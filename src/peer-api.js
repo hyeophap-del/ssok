@@ -9,6 +9,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { sendJson, sendEmpty, rejectBody, readJson, plainAddress } from './http.js';
+import { APP_NAME, APP_ID } from './brand.js';
 import {
   PEER_ID,
   cleanName,
@@ -18,7 +19,7 @@ import {
   newPeerKey,
   pairProof,
   parseAddress,
-  pingGalaxy,
+  pingApp,
   requestJson,
   safeEqual,
 } from './peers.js';
@@ -55,7 +56,7 @@ export function createPeerApi({
   const publicRequest = (p) => p && { rid: p.rid, id: p.id, name: p.name, address: p.address, code: p.code };
   const peerHeaders = (peer) => ({
     Authorization: `Bearer ${peer.sendKey}`,
-    'X-Galaxy-File-Port': String(self().port),
+    'X-App-Port': String(self().port),
   });
 
   // ---- 인증 ----
@@ -70,7 +71,7 @@ export function createPeerApi({
     if (!peer) return null;
     // 키를 가진 진짜 그 PC가 보낸 요청이므로 주소가 바뀌었으면 새 주소를 믿어도 된다
     const address = plainAddress(req.socket.remoteAddress);
-    const port = Number(req.headers['x-galaxy-file-port']);
+    const port = Number(req.headers['x-app-port']);
     let moved = book.moveTo(peer.id, address, isValidPort(port) ? port : peer.port);
     moved = book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port }) || moved;
     if (moved) changed();
@@ -98,7 +99,7 @@ export function createPeerApi({
 
   async function receivePairRequest(req, res) {
     // 웹사이트가 브라우저를 시켜 몰래 연결 요청을 보내지 못하게 한다 (이 헤더는 스크립트가 다른 사이트로 보낼 수 없다)
-    if (req.headers['x-requested-with'] !== 'galaxy-file') {
+    if (req.headers['x-requested-with'] !== APP_ID) {
       rejectBody(req, res);
       return sendJson(res, 403, { error: '허용되지 않은 요청이에요.' });
     }
@@ -252,11 +253,11 @@ export function createPeerApi({
     }
     const target = parseAddress(body?.address);
     if (!target) return sendJson(res, 400, { error: '주소를 확인해 주세요. 예: 192.168.0.40' });
-    const info = await pingGalaxy(target, 3000);
+    const info = await pingApp(target, 3000);
     if (!info) {
-      return sendJson(res, 404, { error: `${target.address}에서 Galaxy File을 찾지 못했어요. 그 PC에서 Galaxy File이 켜져 있는지 확인해 주세요.` });
+      return sendJson(res, 404, { error: `${target.address}에서 ${APP_NAME} 프로그램을 찾지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.` });
     }
-    if (!PEER_ID.test(info.id || '')) return sendJson(res, 400, { error: '그 PC의 Galaxy File을 최신 버전으로 바꿔 주세요.' });
+    if (!PEER_ID.test(info.id || '')) return sendJson(res, 400, { error: `그 PC의 ${APP_NAME} 프로그램을 최신 버전으로 바꿔 주세요.` });
     if (info.id === self().id) return sendJson(res, 400, { error: '이 PC의 주소예요. 다른 PC의 주소를 넣어 주세요.' });
     if (book.saw({ id: info.id, name: cleanName(info.name) || target.address, address: target.address, port: target.port })) changed();
     return sendJson(res, 200, { peer: book.list().find((p) => p.id === info.id) });
@@ -287,12 +288,12 @@ export function createPeerApi({
         const reasons = {
           200: '다른 PC가 응답했어요. 목록을 새로 고친 뒤 다시 시도해 주세요.',
           403: `${target.name}에서 거절했어요.`,
-          408: `${target.name}에서 응답이 없어 취소됐어요. 그 PC의 Galaxy File 화면을 연 뒤 다시 시도해 주세요.`,
+          408: `${target.name}에서 응답이 없어 취소됐어요. 그 PC의 ${APP_NAME} 화면을 연 뒤 다시 시도해 주세요.`,
           409: `${target.name}에서 다른 연결 요청을 처리하는 중이에요. 잠시 뒤 다시 시도해 주세요.`,
         };
         return { id, ok: false, error: reasons[status] || json?.error || '연결하지 못했어요.' };
       })
-      .catch(() => ({ id, ok: false, error: `${target.name}에 연결하지 못했어요. 그 PC에서 Galaxy File이 켜져 있는지 확인해 주세요.` }))
+      .catch(() => ({ id, ok: false, error: `${target.name}에 연결하지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.` }))
       .then((result) => {
         // 화면이 새 목록을 먼저 받아야 결과를 보고 바로 그 PC를 고를 수 있다
         changed();
@@ -330,7 +331,7 @@ export function createPeerApi({
       headers: {
         'Content-Length': length,
         'Content-Type': kind === 'text' ? 'application/json' : 'application/octet-stream',
-        'X-Requested-With': 'galaxy-file',
+        'X-Requested-With': APP_ID,
         ...peerHeaders(peer),
       },
     });
@@ -373,7 +374,7 @@ export function createPeerApi({
     if (result.error) {
       if (book.lost(peer.id)) changed();
       announce();
-      return sendJson(res, 502, { error: `${peer.name}에 보내지 못했어요. 그 PC에서 Galaxy File이 켜져 있는지 확인해 주세요.` });
+      return sendJson(res, 502, { error: `${peer.name}에 보내지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.` });
     }
     if (result.status === 401) {
       // 상대 PC에서 연결을 해제했다
@@ -429,7 +430,7 @@ export function createPeerApi({
     const before = book.signature();
     await Promise.all(
       [...book.paired.values()].map(async (peer) => {
-        const info = await pingGalaxy(peer);
+        const info = await pingApp(peer);
         if (info?.id === peer.id) book.saw({ id: peer.id, name: cleanName(info.name) || peer.name, address: peer.address, port: peer.port });
         else book.lost(peer.id);
       }),

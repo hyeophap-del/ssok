@@ -7,10 +7,11 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createApp, deviceLabel } from '../src/app.js';
 import { Store } from '../src/store.js';
+import { APP_NAME } from '../src/brand.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = 'test-token_123';
-const XRW = { 'X-Requested-With': 'galaxy-file' };
+const XRW = { 'X-Requested-With': 'ssok' };
 
 // 서버는 하나만 띄우고, 접속하는 쪽 주소로 PC와 휴대폰을 구분한다 (실제와 같은 방식).
 // 127.0.0.1에서 오면 PC, 127.0.0.2에서 오면 같은 Wi-Fi의 휴대폰으로 본다.
@@ -62,7 +63,7 @@ function request(target, { method = 'GET', path: urlPath = '/', headers = {}, bo
   });
 }
 
-const cookie = { Cookie: `gf=${TOKEN}` };
+const cookie = { Cookie: `ssok=${TOKEN}` };
 
 function upload(target, name, content, headers = {}, extraQuery = '') {
   const body = Buffer.from(content);
@@ -92,27 +93,40 @@ after(async () => {
 test('ping은 인증 없이 응답한다 (중복 실행 확인용)', async () => {
   const res = await request(remote, { path: '/api/ping' });
   assert.equal(res.status, 200);
-  assert.equal(res.json.app, 'galaxy-file');
+  assert.equal(res.json.app, 'ssok');
 });
 
 test('토큰 없는 휴대폰은 API를 쓸 수 없다', async () => {
   assert.equal((await request(remote, { path: '/api/session' })).status, 401);
   assert.equal((await request(remote, { path: '/api/items' })).status, 401);
   assert.equal((await upload(remote, 'x.txt', 'hi')).status, 401);
-  const wrong = await request(remote, { path: '/api/session', headers: { Cookie: 'gf=wrong' } });
+  const wrong = await request(remote, { path: '/api/session', headers: { Cookie: 'ssok=wrong' } });
   assert.equal(wrong.status, 401);
 });
 
 test('QR 주소(?k=토큰)로 들어오면 쿠키를 받고 이후 인증된다', async () => {
   const page = await request(remote, { path: `/?k=${TOKEN}` });
   assert.equal(page.status, 200);
-  assert.match(page.headers['set-cookie'][0], new RegExp(`^gf=${TOKEN}; Path=/; Max-Age=\\d+; HttpOnly; SameSite=Lax`));
+  assert.match(page.headers['set-cookie'][0], new RegExp(`^ssok=${TOKEN}; Path=/; Max-Age=\\d+; HttpOnly; SameSite=Lax`));
   assert.match(page.headers['content-security-policy'], /script-src 'self'/);
 
   const session = await request(remote, { path: '/api/session', headers: cookie });
   assert.equal(session.status, 200);
   assert.equal(session.json.isHost, false);
   assert.equal(session.json.addresses, undefined, '휴대폰에는 접속 주소(토큰)를 알려 주지 않는다');
+});
+
+test('화면 파일에는 프로그램 이름이 채워져서 나간다', async () => {
+  const page = await request(remote, { path: '/' });
+  const script = await request(remote, { path: '/app.js' });
+  const manifest = await request(remote, { path: '/manifest.webmanifest' });
+  for (const res of [page, script, manifest]) {
+    const text = res.body.toString('utf8');
+    assert.ok(!text.includes('{{APP_'), '자리표시가 남지 않는다');
+    assert.equal(Number(res.headers['content-length']), res.body.length);
+  }
+  assert.match(page.body.toString('utf8'), new RegExp(`<title>${APP_NAME}</title>`));
+  assert.equal(JSON.parse(manifest.body.toString('utf8')).name, APP_NAME);
 });
 
 test('PC 화면에는 QR 코드와 접속 주소를 준다', async () => {
@@ -168,7 +182,7 @@ test('휴대폰이 보낸 파일은 받은 폴더에 원래 이름·날짜로 �
   const again = await upload(remote, '사진:1.jpg', 'SECOND', cookie);
   assert.equal(again.json.name, '사진_1 (1).jpg', '같은 이름은 덮어쓰지 않는다');
   assert.equal(fs.readFileSync(saved, 'utf8'), 'JPEGDATA');
-  assert.deepEqual(fs.readdirSync(receivedDir).filter((n) => n.endsWith('.galaxyfile-part')), []);
+  assert.deepEqual(fs.readdirSync(receivedDir).filter((n) => n.endsWith('.ssok-part')), []);
 });
 
 test('PC가 올린 파일은 휴대폰이 내려받을 수 있다 (이어받기 Range 포함)', async () => {
@@ -281,7 +295,7 @@ test('보내다 끊긴 파일은 흔적 없이 정리된다', async () => {
   });
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(store.list().length, before);
-  assert.deepEqual(fs.readdirSync(receivedDir).filter((n) => n.includes('big') || n.endsWith('.galaxyfile-part')), []);
+  assert.deepEqual(fs.readdirSync(receivedDir).filter((n) => n.includes('big') || n.endsWith('.ssok-part')), []);
 });
 
 test('실시간 알림(SSE)으로 목록과 새 항목을 받는다', async () => {

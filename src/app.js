@@ -10,12 +10,14 @@ import { encodeQR, toSvg } from './qr.js';
 import { sendJson, sendText, sendEmpty, rejectBody, readBody } from './http.js';
 import { safeEqual } from './peers.js';
 import { createPeerApi } from './peer-api.js';
+import { APP_NAME, APP_ID } from './brand.js';
 
 export const VERSION = '1.0.0';
-const COOKIE = 'gf';
+const COOKIE = APP_ID;
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60; // 브라우저가 허용하는 최대치(400일)
 const MAX_TEXT = 100_000;
-const PART_SUFFIX = '.galaxyfile-part';
+const PART_SUFFIX = `.${APP_ID}-part`;
+const PART_FILE = new RegExp(`^\\.[0-9a-f]{16}\\.${APP_ID}-part$`);
 
 const PAGE_CSP = [
   "default-src 'self'",
@@ -32,6 +34,8 @@ const PAGE_CSP = [
 // 내려받는 파일이 브라우저에서 열려도 이 사이트의 권한(쿠키·API)을 쓰지 못하게 격리한다.
 const FILE_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
 
+const TEMPLATED = new Set(['.html', '.js', '.webmanifest']);
+
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -46,7 +50,7 @@ export const newId = () => crypto.randomBytes(8).toString('hex');
 export const newToken = () => crypto.randomBytes(9).toString('base64url');
 
 export function isPartialUpload(fileName) {
-  return /^\.[0-9a-f]{16}\.galaxyfile-part$/.test(fileName);
+  return PART_FILE.test(fileName);
 }
 
 function parseCookies(header = '') {
@@ -200,7 +204,7 @@ export function createApp(options) {
 
     if (pathname === '/api/ping') {
       rejectBody(req, res);
-      return sendJson(res, 200, { app: 'galaxy-file', version: VERSION, id: self.id, name: self.name });
+      return sendJson(res, 200, { app: APP_ID, version: VERSION, id: self.id, name: self.name });
     }
     if (peers && (await peers.handlePublic(req, res, url))) return;
     if (!ctx.authed) {
@@ -210,7 +214,7 @@ export function createApp(options) {
     if (method !== 'GET' && method !== 'HEAD') {
       // 다른 사이트가 보낸 위조 요청(CSRF) 차단: 이 헤더는 같은 출처의 스크립트만 붙일 수 있다.
       const origin = req.headers.origin;
-      if (req.headers['x-requested-with'] !== 'galaxy-file' || (origin && origin !== `http://${req.headers.host}`)) {
+      if (req.headers['x-requested-with'] !== APP_ID || (origin && origin !== `http://${req.headers.host}`)) {
         rejectBody(req, res);
         return sendJson(res, 403, { error: '허용되지 않은 요청이에요.' });
       }
@@ -247,7 +251,7 @@ export function createApp(options) {
   }
 
   function session(ctx) {
-    const info = { app: 'galaxy-file', version: VERSION, isHost: ctx.isHost, device: ctx.device };
+    const info = { app: APP_ID, version: VERSION, isHost: ctx.isHost, device: ctx.device };
     if (!ctx.isHost) return info;
     const port = server.address().port;
     const addresses = lanAddresses().map(({ address, iface }) => {
@@ -515,7 +519,11 @@ export function createApp(options) {
         headers['Set-Cookie'] = `${COOKIE}=${token}; Path=/; Max-Age=${COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax`;
       }
     }
-    const body = await fsp.readFile(file.path);
+    let body = await fsp.readFile(file.path);
+    if (TEMPLATED.has(path.extname(name))) {
+      // 화면 파일 안의 {{APP_NAME}}, {{APP_ID}}를 실제 이름으로 바꿔서 보낸다 (이름은 brand.js 한 곳에서 관리)
+      body = Buffer.from(body.toString('utf8').replaceAll('{{APP_NAME}}', APP_NAME).replaceAll('{{APP_ID}}', APP_ID));
+    }
     headers['Content-Length'] = body.length;
     res.writeHead(200, headers);
     res.end(req.method === 'HEAD' ? undefined : body);

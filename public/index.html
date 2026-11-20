@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
   <meta name="color-scheme" content="light dark">
-  <title>Galaxy File</title>
+  <title>{{APP_NAME}}</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -17,7 +17,7 @@
     <header class="topbar">
       <div class="brand">
         <img src="/icon.svg" alt="" width="30" height="30">
-        <span>Galaxy File</span>
+        <span>{{APP_NAME}}</span>
       </div>
       <div id="status" class="status" data-state="connecting" role="status">
         <span class="dot" aria-hidden="true"></span>
@@ -130,7 +130,7 @@
     <div class="locked-card">
       <img src="/icon.svg" alt="" width="64" height="64">
       <h1>PC 화면의 QR 코드를 스캔하세요</h1>
-      <p>PC에서 Galaxy File을 실행하면 화면에 QR 코드가 나타나요.<br>휴대폰 카메라로 스캔하면 바로 연결돼요.</p>
+      <p>PC에서 {{APP_NAME}} 프로그램을 실행하면 화면에 QR 코드가 나타나요.<br>휴대폰 카메라로 스캔하면 바로 연결돼요.</p>
       <p class="muted small">이미 스캔했는데 이 화면이 보인다면 접속 코드가 바뀌었을 수 있어요. 다시 스캔해 주세요.</p>
     </div>
   </div>
@@ -140,7 +140,7 @@
       <h2 id="peers-title">다른 PC와 연결</h2>
       <button class="icon-btn" type="button" data-close aria-label="닫기"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
-    <p class="muted small">다른 PC에서도 Galaxy File을 실행하면 아래에 나타나요. 처음 한 번만 연결해 두면 다음부터는 바로 보낼 수 있어요.</p>
+    <p class="muted small">다른 PC에서도 {{APP_NAME}} 프로그램을 실행하면 아래에 나타나요. 처음 한 번만 연결해 두면 다음부터는 바로 보낼 수 있어요.</p>
 
     <div id="pairing" class="pairing" hidden>
       <div id="pairing-code" class="code" aria-label="확인 숫자"></div>

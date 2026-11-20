@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Galaxy File — 같은 Wi-Fi에 있는 PC와 휴대폰이 파일·텍스트를 주고받게 해 주는 작은 서버.
+// 같은 Wi-Fi에 있는 PC와 휴대폰이 파일·텍스트를 주고받게 해 주는 작은 서버.
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { createApp, newToken, isPartialUpload, VERSION } from './src/app.js';
 import { Store } from './src/store.js';
 import { lanAddresses, broadcastAddresses } from './src/net.js';
-import { PeerBook, newPeerId, cleanName, pingGalaxy } from './src/peers.js';
+import { PeerBook, newPeerId, cleanName, pingApp } from './src/peers.js';
+import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME } from './src/brand.js';
 import { startDiscovery } from './src/discovery.js';
 import { encodeQR, toTerminal } from './src/qr.js';
 import { openUrl, openPath, revealPath } from './src/open.js';
@@ -19,11 +20,11 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8765;
 
 const HELP = `
-Galaxy File ${VERSION} — PC와 휴대폰 사이 무선 파일 공유
+${APP_NAME} ${VERSION} — PC·휴대폰 사이 무선 파일 공유
 
 사용법: node server.js [옵션]
 
-  --dir <폴더>       휴대폰에서 받은 파일을 저장할 폴더 (기본: 다운로드\\Galaxy File, 한 번 정하면 기억)
+  --dir <폴더>       휴대폰에서 받은 파일을 저장할 폴더 (기본: 다운로드\\${RECEIVED_DIR_NAME}, 한 번 정하면 기억)
   --port <번호>      사용할 포트 (기본: ${DEFAULT_PORT})
   --host <주소>      접속을 받을 주소 (기본: 0.0.0.0 = 모든 네트워크, 127.0.0.1 = 이 PC만)
   --name <이름>      다른 PC에 보일 이 PC의 이름 (기본: 컴퓨터 이름, 한 번 정하면 기억)
@@ -53,9 +54,9 @@ function parseCli() {
 }
 
 function appHome() {
-  if (process.env.GALAXY_FILE_HOME) return path.resolve(process.env.GALAXY_FILE_HOME);
-  if (process.platform === 'win32' && process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, 'GalaxyFile');
-  return path.join(os.homedir(), '.galaxy-file');
+  if (process.env.SSOK_HOME) return path.resolve(process.env.SSOK_HOME);
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, APP_DIR);
+  return path.join(os.homedir(), `.${APP_ID}`);
 }
 
 function readJson(file) {
@@ -70,6 +71,34 @@ function writeJson(file, data) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, file);
+}
+
+/** 예전 이름(Galaxy File)으로 쓰던 설정·목록·받은 파일 폴더를 그대로 이어 쓴다 */
+function migrateLegacyHome(home) {
+  if (process.env.SSOK_HOME || !process.env.LOCALAPPDATA) return;
+  const legacy = path.join(process.env.LOCALAPPDATA, 'GalaxyFile');
+  if (!fs.existsSync(legacy) || fs.existsSync(home)) return;
+  try {
+    fs.renameSync(legacy, home);
+  } catch {
+    return; // 옮기지 못하면 새로 시작한다
+  }
+  const configPath = path.join(home, 'config.json');
+  const config = readJson(configPath);
+  const oldReceived = path.join(os.homedir(), 'Downloads', 'Galaxy File');
+  if (config && !config.dir && fs.existsSync(oldReceived)) {
+    config.dir = oldReceived;
+    writeJson(configPath, config);
+  }
+  // 목록에 적힌 '휴대폰으로 보낼 파일' 경로도 새 폴더로 고친다
+  const itemsPath = path.join(home, 'items.json');
+  const items = readJson(itemsPath);
+  if (Array.isArray(items?.items)) {
+    for (const item of items.items) {
+      if (typeof item.path === 'string' && item.path.startsWith(legacy + path.sep)) item.path = home + item.path.slice(legacy.length);
+    }
+    writeJson(itemsPath, items);
+  }
 }
 
 function listen(server, port, host) {
@@ -129,7 +158,7 @@ function logEvent(type, payload) {
     const what = item?.kind === 'file' ? `${item.name} (${formatSize(item.size)})` : '텍스트';
     console.log(`  [${time}] PC → ${to}  ${what}`);
   } else if (type === 'pair-request') {
-    console.log(`  [${time}] ${payload.name}(${payload.address})에서 연결을 요청했어요. 확인 숫자 ${payload.code} — Galaxy File 화면에서 허용해 주세요.`);
+    console.log(`  [${time}] ${payload.name}(${payload.address})에서 연결을 요청했어요. 확인 숫자 ${payload.code} — ${APP_NAME} 화면에서 허용해 주세요.`);
   } else if (type === 'paired') {
     console.log(`  [${time}] ${payload} 연결됨 — 이제 서로 파일을 보낼 수 있어요`);
   } else if (type === 'unpaired') {
@@ -149,6 +178,7 @@ async function main() {
   }
 
   const home = appHome();
+  migrateLegacyHome(home);
   fs.mkdirSync(home, { recursive: true });
   const configPath = path.join(home, 'config.json');
   const config = readJson(configPath) ?? {};
@@ -158,7 +188,7 @@ async function main() {
   if (args.name !== undefined) config.name = cleanName(args.name) || undefined;
   const pcName = config.name || cleanName(os.hostname()) || '내 PC';
 
-  const receivedDir = config.dir ?? path.join(os.homedir(), 'Downloads', 'Galaxy File');
+  const receivedDir = config.dir ?? path.join(os.homedir(), 'Downloads', RECEIVED_DIR_NAME);
   const outboxDir = path.join(home, 'outbox');
   fs.mkdirSync(receivedDir, { recursive: true });
   fs.mkdirSync(outboxDir, { recursive: true });
@@ -223,12 +253,12 @@ async function main() {
       break;
     } catch (err) {
       if (err.code !== 'EADDRINUSE' && err.code !== 'EACCES') throw err;
-      if (await pingGalaxy({ address: '127.0.0.1', port: candidate })) {
+      if (await pingApp({ address: '127.0.0.1', port: candidate })) {
         const pcUrl = `http://localhost:${candidate}/`;
         if (args['no-open']) {
-          console.log(`\n  Galaxy File이 이미 실행 중이에요. PC 화면: ${pcUrl}\n`);
+          console.log(`\n  ${APP_NAME} 프로그램이 이미 실행 중이에요. PC 화면: ${pcUrl}\n`);
         } else {
-          console.log(`\n  Galaxy File이 이미 실행 중이에요. 브라우저에서 화면을 열게요.\n`);
+          console.log(`\n  ${APP_NAME} 프로그램이 이미 실행 중이에요. 브라우저에서 화면을 열게요.\n`);
           openUrl(pcUrl);
         }
         return;
@@ -248,7 +278,7 @@ async function main() {
 
   const addresses = localOnly ? [{ address: '127.0.0.1' }] : lanAddresses();
   const pcUrl = `http://localhost:${port}/`;
-  console.log(`\n  Galaxy File ${VERSION} 실행 중\n`);
+  console.log(`\n  ${APP_NAME} ${VERSION} 실행 중\n`);
   if (addresses.length) {
     const phoneUrl = `http://${addresses[0].address}:${port}/?k=${config.token}`;
     console.log(toTerminal(encodeQR(phoneUrl)).replace(/^/gm, '  '));
@@ -265,7 +295,7 @@ async function main() {
   for (const warning of networkWarnings) console.log(`\n  ⚠ ${warning}`);
   console.log(`\n  이 창을 닫으면 공유가 멈춰요. 끝내려면 Ctrl+C\n`);
 
-  // 같은 네트워크에서 Galaxy File을 켠 다른 PC 찾기
+  // 같은 네트워크에서 이 프로그램을 켠 다른 PC 찾기
   if (!localOnly) {
     try {
       discovery = await startDiscovery({

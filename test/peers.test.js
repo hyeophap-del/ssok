@@ -12,7 +12,7 @@ import { PeerBook, parseAddress, cleanName } from '../src/peers.js';
 // PC 여러 대를 한 컴퓨터에 띄워서 서로 연결해 본다.
 // 각 PC의 화면(호스트)은 127.0.0.1에서, 같은 Wi-Fi의 휴대폰은 127.0.0.2에서 접속하는 것으로 본다.
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const XRW = { 'X-Requested-With': 'galaxy-file' };
+const XRW = { 'X-Requested-With': 'ssok' };
 const IDS = { A: 'a0a0a0a0a0a0a0a0', B: 'b0b0b0b0b0b0b0b0', C: 'c0c0c0c0c0c0c0c0' };
 let tmp;
 const pcs = {};
@@ -178,7 +178,7 @@ test('주소 입력을 해석한다', () => {
 
 test('ping에 PC 이름과 고유 번호가 나온다', async () => {
   const res = await request(pcs.A, { path: '/api/ping', from: '127.0.0.2' });
-  assert.deepEqual(res.json, { app: 'galaxy-file', version: res.json.version, id: IDS.A, name: 'PC-A' });
+  assert.deepEqual(res.json, { app: 'ssok', version: res.json.version, id: IDS.A, name: 'PC-A' });
 });
 
 test('주소로 다른 PC를 찾고, 상대 화면에서 허용하면 서로 연결된다', async () => {
@@ -224,11 +224,11 @@ test('연결된 PC로 보낸 파일·텍스트는 상대 PC의 받은 폴더와 
   assert.equal(textItem.from, 'peer');
 
   assert.equal(pcs.A.store.list().length, 0, '보낸 쪽 목록(휴대폰용)에는 쌓지 않는다');
-  assert.deepEqual(fs.readdirSync(pcs.B.receivedDir).filter((n) => n.endsWith('.galaxyfile-part')), []);
+  assert.deepEqual(fs.readdirSync(pcs.B.receivedDir).filter((n) => n.endsWith('.ssok-part')), []);
 });
 
 test('휴대폰이나 연결된 PC는 PC 화면 전용 기능을 쓸 수 없다', async () => {
-  const phone = { Cookie: 'gf=token-A' };
+  const phone = { Cookie: 'ssok=token-A' };
   assert.equal((await request(pcs.A, { path: '/api/peers', headers: phone, from: '127.0.0.2' })).status, 403);
   assert.equal((await postBytes(pcs.A, `/api/peers/${IDS.B}/upload?name=x`, 'x', phone, '127.0.0.2')).status, 403);
 
@@ -316,7 +316,7 @@ test('보내다 취소하면 상대 PC에 받다 만 파일이 남지 않는다'
       resolve();
     }, 150);
   });
-  await waitUntil(() => fs.readdirSync(pcs.B.receivedDir).every((n) => !n.endsWith('.galaxyfile-part')));
+  await waitUntil(() => fs.readdirSync(pcs.B.receivedDir).every((n) => !n.endsWith('.ssok-part')));
   assert.equal(pcs.B.store.list().length, before);
   assert.ok(!fs.existsSync(path.join(pcs.B.receivedDir, 'big.mp4')));
 });

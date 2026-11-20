@@ -1,6 +1,6 @@
 {
-  "name": "Galaxy File",
-  "short_name": "Galaxy File",
+  "name": "{{APP_NAME}}",
+  "short_name": "{{APP_NAME}}",
   "description": "PC와 휴대폰 사이 무선 파일 공유",
   "lang": "ko",
   "start_url": "/",

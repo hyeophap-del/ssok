@@ -1,10 +1,12 @@
-// Galaxy File 웹 화면. PC(호스트)와 휴대폰이 같은 페이지를 쓰고, 세션 정보에 따라 화면이 바뀐다.
+// {{APP_NAME}} 웹 화면. PC(호스트)와 휴대폰이 같은 페이지를 쓰고, 세션 정보에 따라 화면이 바뀐다.
 
 const $ = (id) => document.getElementById(id);
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const DOWNLOADED_KEY = 'gf.downloaded';
-const TIP_KEY = 'gf.installTipClosed';
-const TARGET_KEY = 'gf.target';
+const APP_NAME = '{{APP_NAME}}'; // 서버가 보낼 때 실제 이름으로 바꿔 넣는다
+const APP_ID = '{{APP_ID}}';
+const DOWNLOADED_KEY = `${APP_ID}.downloaded`;
+const TIP_KEY = `${APP_ID}.installTipClosed`;
+const TARGET_KEY = `${APP_ID}.target`;
 const PREVIEWABLE_IMAGES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp']);
 
 const store = {
@@ -77,7 +79,7 @@ async function init() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     state.unseen = 0;
-    document.title = 'Galaxy File';
+    document.title = APP_NAME;
     if (!state.connected) reconnect();
   });
 
@@ -102,7 +104,7 @@ function setupHost() {
   if (addresses.length) {
     showAddress(0);
   } else {
-    $('qr').replaceWith(el('p', { class: 'muted' }, 'Wi-Fi 연결을 찾지 못했어요. 네트워크에 연결한 뒤 Galaxy File을 다시 실행해 주세요.'));
+    $('qr').replaceWith(el('p', { class: 'muted' }, `Wi-Fi 연결을 찾지 못했어요. 네트워크에 연결한 뒤 ${APP_NAME} 프로그램을 다시 실행해 주세요.`));
   }
   if (addresses.length > 1) {
     const select = $('addr-select');
@@ -228,7 +230,7 @@ async function reconnect() {
 function updateStatus() {
   const { isHost } = state.session;
   if (!state.connected) {
-    return setStatus('offline', isHost ? 'Galaxy File이 꺼져 있어요' : 'PC와 연결이 끊겼어요 · 다시 연결 중');
+    return setStatus('offline', isHost ? `${APP_NAME} 프로그램이 꺼져 있어요` : 'PC와 연결이 끊겼어요 · 다시 연결 중');
   }
   if (!isHost) return setStatus('online', 'PC와 연결됨');
   const n = state.remotes.length;
@@ -252,7 +254,7 @@ function announce(item) {
 
   if (document.hidden) {
     state.unseen++;
-    document.title = `(${state.unseen}) Galaxy File`;
+    document.title = `(${state.unseen}) ${APP_NAME}`;
   }
 
   if (!state.session.isHost) navigator.vibrate?.(60);
@@ -582,9 +584,9 @@ function uploadFile(file, target, onProgress) {
     transfer.xhr = xhr;
     const params = new URLSearchParams({ name: file.name || 'file' });
     if (file.lastModified) params.set('lastModified', String(file.lastModified));
-    // 다른 PC로 보낼 때는 이 PC의 Galaxy File이 받아서 그대로 그 PC로 흘려보낸다
+    // 다른 PC로 보낼 때는 이 PC의 프로그램이 받아서 그대로 그 PC로 흘려보낸다
     xhr.open('POST', `${target ? `/api/peers/${target.id}/upload` : '/api/upload'}?${params}`);
-    xhr.setRequestHeader('X-Requested-With', 'galaxy-file');
+    xhr.setRequestHeader('X-Requested-With', APP_ID);
     xhr.upload.addEventListener('progress', (e) => onProgress(e.loaded));
     xhr.addEventListener('load', () => {
       transfer.xhr = null;
@@ -771,7 +773,7 @@ function renderTargets() {
   if (peer) {
     $('dropzone-title').textContent = `${peer.name}에 보낼 파일을 여기에 끌어다 놓으세요`;
     $('dropzone-hint').textContent = offline
-      ? '지금은 꺼져 있는 것 같아요. 그 PC에서 Galaxy File을 켜 주세요.'
+      ? `지금은 꺼져 있는 것 같아요. 그 PC에서 ${APP_NAME} 프로그램을 켜 주세요.`
       : '그 PC의 받은 파일 폴더에 바로 저장돼요. 캡처한 화면은 Ctrl+V로 붙여 넣으세요.';
     $('text-input').placeholder = `${peer.name}에 보낼 텍스트나 링크`;
   } else {
@@ -921,7 +923,7 @@ function showRequest(request) {
   $('request-code').textContent = request.code;
   const dialog = $('request-dialog');
   if (!dialog.open) dialog.showModal();
-  if (document.hidden) document.title = '연결 요청 · Galaxy File';
+  if (document.hidden) document.title = `연결 요청 · ${APP_NAME}`;
 }
 
 function hideRequest() {
@@ -947,7 +949,7 @@ async function decideRequest(decision) {
 async function api(url, options = {}) {
   const res = await fetch(url, {
     ...options,
-    headers: { 'X-Requested-With': 'galaxy-file', ...options.headers },
+    headers: { 'X-Requested-With': APP_ID, ...options.headers },
   });
   if (res.status === 401) {
     showLocked();

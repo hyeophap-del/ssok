@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { startDiscovery, parseAnnouncement } from '../src/discovery.js';
 
 test('알림 메시지를 검사한다', () => {
-  const ok = Buffer.from(JSON.stringify({ app: 'galaxy-file', v: 1, t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: ' 거실 PC ', port: 8765 }));
+  const ok = Buffer.from(JSON.stringify({ app: 'ssok', v: 1, t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: ' 거실 PC ', port: 8765 }));
   assert.deepEqual(parseAnnouncement(ok), { type: 'hello', id: 'a0a0a0a0a0a0a0a0', name: '거실 PC', port: 8765 });
   const bad = (msg) => parseAnnouncement(Buffer.from(typeof msg === 'string' ? msg : JSON.stringify(msg)));
   assert.equal(bad('not json'), null);
   assert.equal(bad({ app: 'other', t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: 'x', port: 1 }), null);
-  assert.equal(bad({ app: 'galaxy-file', t: 'hello', id: '../etc', name: 'x', port: 1 }), null);
-  assert.equal(bad({ app: 'galaxy-file', t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: '', port: 1 }), null);
-  assert.equal(bad({ app: 'galaxy-file', t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: 'x', port: 70000 }), null);
+  assert.equal(bad({ app: 'ssok', t: 'hello', id: '../etc', name: 'x', port: 1 }), null);
+  assert.equal(bad({ app: 'ssok', t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: '', port: 1 }), null);
+  assert.equal(bad({ app: 'ssok', t: 'hello', id: 'a0a0a0a0a0a0a0a0', name: 'x', port: 70000 }), null);
   assert.equal(parseAnnouncement(Buffer.alloc(2000, 32)), null);
 });
 

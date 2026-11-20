@@ -1,10 +1,11 @@
-// 같은 네트워크에서 Galaxy File을 실행 중인 다른 PC를 자동으로 찾는다 (UDP 브로드캐스트).
+// 같은 네트워크에서 이 프로그램을 실행 중인 다른 PC를 자동으로 찾는다 (UDP 브로드캐스트).
 // 찾은 정보는 "여기 이런 PC가 있다"는 안내일 뿐이고, 실제로 주고받기 전에는 반드시 연결(페어링)과 키 확인을 거친다.
 import dgram from 'node:dgram';
 import { cleanName, isValidPort, PEER_ID } from './peers.js';
+import { APP_ID } from './brand.js';
 
 export const DISCOVERY_PORT = 8765;
-const APP = 'galaxy-file';
+const APP = APP_ID;
 const ANNOUNCE_EVERY_MS = 30_000;
 
 /** 받은 UDP 메시지를 검사해서 { type, id, name, port }로 돌려준다. 이상하면 null. */

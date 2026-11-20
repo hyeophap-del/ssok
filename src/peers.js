@@ -1,8 +1,9 @@
-// 다른 PC의 Galaxy File과 연결하기: 연결된 PC 목록, 주변 PC, PC끼리 주고받는 요청
+// 다른 PC의 같은 프로그램과 연결하기: 연결된 PC 목록, 주변 PC, PC끼리 주고받는 요청
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { APP_ID } from './brand.js';
 
 export const DEFAULT_PORT = 8765;
 export const PEER_ID = /^[0-9a-f]{16}$/;
@@ -44,7 +45,7 @@ export function safeEqual(a, b) {
  * 같은 Wi-Fi의 다른 기기가 그 PC인 척 주소를 바꿔치기할 수 없다. 키 자체는 보내지 않는다.
  */
 export function pairProof(key, nonce, fromId, toId) {
-  return crypto.createHmac('sha256', key).update(`galaxy-file-proof\n${nonce}\n${fromId}\n${toId}`).digest('base64url');
+  return crypto.createHmac('sha256', key).update(`${APP_ID}-proof\n${nonce}\n${fromId}\n${toId}`).digest('base64url');
 }
 
 /** "192.168.0.40", "192.168.0.40:8766", "DESKTOP-ABC" 같은 입력을 주소와 포트로 나눈다. */
@@ -60,7 +61,7 @@ export function parseAddress(input) {
   return { address: m[1], port };
 }
 
-/** 다른 PC의 Galaxy File에 JSON 요청을 보낸다. 응답이 JSON이 아니면 json은 null. */
+/** 다른 PC의 이 프로그램에 JSON 요청을 보낸다. 응답이 JSON이 아니면 json은 null. */
 export function requestJson({ address, port }, { method = 'GET', path: urlPath, body, headers = {}, timeout = 5000 }) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
@@ -72,7 +73,7 @@ export function requestJson({ address, port }, { method = 'GET', path: urlPath, 
         path: urlPath,
         timeout,
         headers: {
-          'X-Requested-With': 'galaxy-file',
+          'X-Requested-With': APP_ID,
           ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
           ...headers,
         },
@@ -103,11 +104,11 @@ export function requestJson({ address, port }, { method = 'GET', path: urlPath, 
   });
 }
 
-/** 그 주소에서 Galaxy File이 돌고 있으면 ping 응답({app, version, id, name})을, 아니면 null을 준다. */
-export async function pingGalaxy(target, timeout = 1500) {
+/** 그 주소에서 이 프로그램이 돌고 있으면 ping 응답({app, version, id, name})을, 아니면 null을 준다. */
+export async function pingApp(target, timeout = 1500) {
   try {
     const { status, json } = await requestJson(target, { path: '/api/ping', timeout });
-    return status === 200 && json?.app === 'galaxy-file' ? json : null;
+    return status === 200 && json?.app === APP_ID ? json : null;
   } catch {
     return null;
   }
