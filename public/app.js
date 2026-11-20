@@ -9,6 +9,8 @@ const TIP_KEY = `${APP_ID}.installTipClosed`;
 const TARGET_KEY = `${APP_ID}.target`;
 const APP_CARD_KEY = `${APP_ID}.appCardClosed`;
 const ANDROID_PACKAGE = 'app.ssok.android';
+/** 창 제목. PC 화면은 알림 영역 아이콘이 이 제목으로 창을 찾아 앞으로 가져온다 (server.js의 HOST_TITLE과 같아야 한다) */
+const pageTitle = () => (state.session?.isHost ? `${APP_NAME} · PC` : APP_NAME);
 const PREVIEWABLE_IMAGES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp']);
 
 const store = {
@@ -62,6 +64,7 @@ async function init() {
   if (!session) return showLocked();
   state.session = session;
 
+  document.title = pageTitle();
   const app = $('app');
   app.classList.add(session.isHost ? 'host' : 'remote');
   app.hidden = false;
@@ -81,7 +84,7 @@ async function init() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     state.unseen = 0;
-    document.title = APP_NAME;
+    document.title = pageTitle();
     if (!state.connected) reconnect();
   });
 
@@ -283,7 +286,7 @@ function announce(item) {
 
   if (document.hidden) {
     state.unseen++;
-    document.title = `(${state.unseen}) ${APP_NAME}`;
+    document.title = `(${state.unseen}) ${pageTitle()}`;
   }
 
   if (!state.session.isHost) navigator.vibrate?.(60);
@@ -1101,7 +1104,7 @@ function showRequest(request) {
   $('request-code').textContent = formatCode(request.code);
   const dialog = $('request-dialog');
   if (!dialog.open) dialog.showModal();
-  if (document.hidden) document.title = `연결 요청 · ${APP_NAME}`;
+  if (document.hidden) document.title = `연결 요청 · ${pageTitle()}`;
 }
 
 function hideRequest() {

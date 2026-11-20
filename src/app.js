@@ -169,6 +169,8 @@ export function createApp(options) {
     settings = null,
     onQuit = null,
     updater = null, // { state(), check(), apply() } — exe로 설치했을 때만
+    onShow = null, // PC 화면 창을 열거나 앞으로 가져오기 (시작 메뉴로 다시 실행했을 때)
+    onHostPagesClosed = () => {}, // 열려 있던 PC 화면이 모두 닫혔을 때
     log = () => {},
   } = options;
 
@@ -288,6 +290,12 @@ export function createApp(options) {
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
     if (pathname === '/api/settings' && (method === 'GET' || method === 'POST')) return settingsApi(req, res, ctx);
     if (pathname.startsWith('/api/update')) return updateApi(req, res, url, ctx);
+    if (pathname === '/api/show' && method === 'POST') {
+      rejectBody(req, res);
+      if (!ctx.isHost || !onShow) return sendJson(res, 403, { error: 'PC에서만 할 수 있어요.' });
+      onShow();
+      return sendEmpty(res);
+    }
     if (pathname === '/api/quit' && method === 'POST') {
       rejectBody(req, res);
       if (!ctx.isHost || !onQuit) return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
@@ -430,6 +438,8 @@ export function createApp(options) {
       clearInterval(ping);
       clients.delete(client);
       broadcast('presence', presence());
+      // 새로 고침이 아니라 정말 창을 닫았는지 잠깐 기다려 본다
+      if (client.isHost && !hasHostPage()) setTimeout(() => !hasHostPage() && onHostPagesClosed(), 4000).unref();
     });
   }
 
@@ -682,5 +692,9 @@ export function createApp(options) {
     return closed;
   }
 
-  return { server, broadcast, broadcastHost, close, clients, peers };
+  function hasHostPage() {
+    return [...clients].some((c) => c.isHost);
+  }
+
+  return { server, broadcast, broadcastHost, close, clients, peers, hasHostPage };
 }

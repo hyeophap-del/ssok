@@ -14,7 +14,8 @@ import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME, REPO } from './src/brand.
 import { startDiscovery } from './src/discovery.js';
 import { loadIdentity } from './src/tls.js';
 import { encodeQR, toTerminal } from './src/qr.js';
-import { openUrl, openPath, revealPath } from './src/open.js';
+import { openPath, revealPath } from './src/open.js';
+import { openAppWindow, startTray } from './src/window.js';
 import {
   publicNetworkAdapters,
   shortcutsSupported,
@@ -101,6 +102,20 @@ function saveConfig(file, config) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** PC 화면 창의 제목 (알림 영역 아이콘이 이 제목으로 창을 찾아 앞으로 가져온다. public/app.js와 같아야 한다) */
+const HOST_TITLE = `${APP_NAME} · PC`;
+
+/** 돌고 있는 쏙에게 PC 화면 창을 보여 달라고 한다. 예전 버전이라 못 알아들으면 직접 연다. */
+async function askToShow(port) {
+  try {
+    const { status } = await requestJson({ address: '127.0.0.1', port }, { method: 'POST', path: '/api/show', timeout: 3000 });
+    if (status === 204) return;
+  } catch {
+    // 아래에서 직접 연다
+  }
+  openAppWindow(`http://localhost:${port}/`);
+}
+
 /** 시작 메뉴·자동 실행 바로가기: 지금 이 프로그램(exe, 또는 node.exe + server.js)을 --launch로 실행한다 */
 function createLaunchShortcut(file, extraArgs = []) {
   return createShortcut({
@@ -142,7 +157,7 @@ async function launch(args, home, configPath) {
   const installed = EXE && process.platform === 'win32' ? installedExePath() : null;
   if (installed && !samePath(process.execPath, installed)) {
     if (running && running.version === VERSION && running.exe && samePath(running.exe, installed)) {
-      if (!args['no-open']) openUrl(`http://localhost:${port}/`);
+      if (!args['no-open']) await askToShow(port);
       return; // 같은 버전이 이미 설치되어 돌고 있다
     }
     if (running) {
@@ -189,7 +204,7 @@ async function launch(args, home, configPath) {
       return;
     }
   }
-  if (!args['no-open']) openUrl(`http://localhost:${port}/`);
+  if (!args['no-open']) await askToShow(port);
   await ensureShortcuts(configPath).catch((err) => console.error(`바로가기를 만들지 못했어요: ${err.message}`));
 }
 
@@ -428,19 +443,34 @@ async function main() {
       },
     },
     onQuit: () => shutdown(),
+    onShow: () => showWindow(),
+    onHostPagesClosed: () => {
+      // 창을 처음 닫았을 때 한 번만: 꺼진 게 아니라 알림 영역에서 계속 받고 있다고 알려 준다
+      if (!tray || config.trayHintShown) return;
+      config.trayHintShown = true;
+      saveConfig(configPath, config);
+      tray.balloon(`${APP_NAME}은(는) 계속 실행 중이에요`, '창을 닫아도 휴대폰·다른 PC에서 보내면 바로 받아요. 끄려면 이 아이콘을 오른쪽 클릭하세요.');
+    },
     updater,
     peerBook,
     announce: () => discovery?.announce(),
     showHostPage: () => {
-      // 다른 PC가 연결을 요청했는데 이 PC 화면이 닫혀 있으면 열어 준다 (너무 자주 열지는 않는다)
-      if (args['no-open'] || Date.now() - lastShown < 5 * 60_000) return;
+      // 다른 기기가 연결을 요청했는데 이 PC 화면이 닫혀 있으면 열어 준다 (너무 자주 열지는 않는다)
+      if (Date.now() - lastShown < 5 * 60_000) return;
       lastShown = Date.now();
-      openUrl(`http://localhost:${port}/`);
+      showWindow();
     },
     log: logEvent,
   });
   let discovery = null;
   let lastShown = 0;
+  let tray = null; // 알림 영역(작업 표시줄 오른쪽) 아이콘. 뒤에서 실행할 때만 띄운다.
+
+  /** PC 화면을 '쏙' 전용 창으로 연다. 이미 열려 있으면 앞으로 가져온다. */
+  function showWindow() {
+    if (tray && app.hasHostPage()) tray.activate(HOST_TITLE);
+    else openAppWindow(`http://localhost:${port}/`);
+  }
 
   // 포트 고르기. 휴대폰 홈 화면 바로가기가 계속 동작하도록 한 번 쓴 포트를 기억해 둔다.
   const explicitPort = args.port !== undefined;
@@ -463,7 +493,7 @@ async function main() {
           console.log(`\n  ${APP_NAME} 프로그램이 이미 실행 중이에요. PC 화면: ${pcUrl}\n`);
         } else {
           console.log(`\n  ${APP_NAME} 프로그램이 이미 실행 중이에요. 브라우저에서 화면을 열게요.\n`);
-          openUrl(pcUrl);
+          openAppWindow(pcUrl);
         }
         return;
       }
@@ -524,7 +554,18 @@ async function main() {
   app.peers.refresh();
   setInterval(() => app.peers.refresh(), 30_000).unref();
 
-  if (!args['no-open']) openUrl(pcUrl);
+  // 카카오톡처럼: 창을 닫아도 알림 영역 아이콘으로 남아 계속 받는다. 아이콘을 누르면 창이 열리고, 오른쪽 클릭 → 끄기.
+  if (args.background) {
+    tray = startTray({
+      iconPath: EXE ? process.execPath : path.join(ROOT, 'public', 'icon.ico'),
+      tooltip: `${APP_NAME} — 휴대폰·PC 파일 주고받기`,
+      onOpen: () => showWindow(),
+      onQuit: () => shutdown(),
+      log: logEvent,
+    });
+  }
+
+  if (!args['no-open']) showWindow();
 
   let closing = false;
   async function shutdown() {
@@ -536,6 +577,7 @@ async function main() {
       console.error(`목록을 저장하지 못했어요: ${err.message}`);
     }
     discovery?.close();
+    tray?.close();
     await Promise.race([app.close(), new Promise((r) => setTimeout(r, 1000))]);
     process.exit(0);
   }
