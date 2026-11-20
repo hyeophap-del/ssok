@@ -100,6 +100,7 @@ function setupHost() {
     $('net-warning').hidden = false;
   }
   $('open-folder').addEventListener('click', () => post('/api/open-folder').catch(showError));
+  setupSettings();
 
   if (addresses.length) {
     showAddress(0);
@@ -689,6 +690,60 @@ function setupDragAndDrop() {
     enqueue(files);
   });
 }
+
+// ---- 설정 (PC 화면 전용) ----
+
+function setupSettings() {
+  const { settings, canQuit } = state.session;
+  if (!settings && !canQuit) return;
+  $('settings').hidden = false;
+
+  if (settings) {
+    $('pc-name').value = settings.name;
+    $('name-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const saved = await saveSettings({ name: $('pc-name').value });
+        $('pc-name').value = saved.name;
+        $('self-name').textContent = saved.name;
+        toast('이름을 바꿨어요.');
+      } catch (err) {
+        showError(err);
+      }
+    });
+    if (settings.autostart !== null) {
+      $('autostart-row').hidden = false;
+      $('autostart').checked = settings.autostart;
+      $('autostart').addEventListener('change', async (e) => {
+        try {
+          const saved = await saveSettings({ autostart: e.target.checked });
+          e.target.checked = saved.autostart;
+          toast(saved.autostart ? 'PC를 켜면 자동으로 실행돼요.' : '자동 실행을 껐어요.');
+        } catch (err) {
+          e.target.checked = !e.target.checked;
+          showError(err);
+        }
+      });
+    }
+  }
+
+  if (canQuit) {
+    $('quit').hidden = false;
+    $('quit').addEventListener('click', async () => {
+      if (!confirm(`${APP_NAME} 프로그램을 끌까요?
+휴대폰이나 다른 PC에서 보내도 받지 못하게 돼요. 다시 켜려면 시작 메뉴에서 ${APP_NAME}을(를) 실행하세요.`)) return;
+      try {
+        await post('/api/quit');
+        toast('껐어요. 이 창은 닫아도 돼요.');
+      } catch (err) {
+        showError(err);
+      }
+    });
+  }
+}
+
+const saveSettings = (patch) =>
+  api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
 
 // ---- 다른 PC (PC 화면 전용) ----
 

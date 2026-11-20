@@ -1,4 +1,4 @@
-// public/icon.svg와 같은 모양의 PNG 아이콘을 만든다 (홈 화면 바로가기용).
+// public/icon.svg와 같은 모양의 PNG 아이콘(홈 화면 바로가기용)과 Windows 아이콘(icon.ico, 바탕 화면·시작 메뉴용)을 만든다.
 // 사용법: node scripts/make-icons.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,7 +30,7 @@ function inRoundedRect(x, y, size, r) {
   return Math.hypot(x - cx, y - cy) <= r;
 }
 
-function render(size, { rounded }) {
+function render(size, { rounded, stroke = STROKE_RADIUS }) {
   const SAMPLES = 4;
   const scale = 512 / size;
   const pixels = Buffer.alloc(size * size * 4);
@@ -46,7 +46,7 @@ function render(size, { rounded }) {
           const Y = (y + (sy + 0.5) / SAMPLES) * scale;
           if (rounded && !inRoundedRect(X, Y, 512, 112)) continue;
           let color;
-          if (SEGMENTS.some((s) => distToSegment(X, Y, s) <= STROKE_RADIUS)) {
+          if (SEGMENTS.some((s) => distToSegment(X, Y, s) <= stroke)) {
             color = [255, 255, 255];
           } else {
             const t = Math.min(1, Math.max(0, (X + Y) / 1024));
@@ -120,3 +120,25 @@ for (const [name, size, options] of targets) {
   fs.writeFileSync(path.join(OUT, name), render(size, options));
   console.log(`만듦: public/${name}`);
 }
+
+// Windows 아이콘: 여러 크기의 PNG를 한 파일에 담는다. 작은 크기는 선을 굵게 해서 뭉개지지 않게 한다.
+const ICO_SIZES = [16, 24, 32, 48, 64, 256];
+const images = ICO_SIZES.map((size) => render(size, { rounded: true, stroke: size <= 32 ? 34 : size <= 64 ? 26 : STROKE_RADIUS }));
+const header = Buffer.alloc(6 + 16 * images.length);
+header.writeUInt16LE(0, 0);
+header.writeUInt16LE(1, 2); // 아이콘
+header.writeUInt16LE(images.length, 4);
+let offset = header.length;
+images.forEach((png, i) => {
+  const size = ICO_SIZES[i];
+  const at = 6 + 16 * i;
+  header[at] = size === 256 ? 0 : size;
+  header[at + 1] = size === 256 ? 0 : size;
+  header.writeUInt16LE(1, at + 4); // 색 평면
+  header.writeUInt16LE(32, at + 6); // 비트 수
+  header.writeUInt32LE(png.length, at + 8);
+  header.writeUInt32LE(offset, at + 12);
+  offset += png.length;
+});
+fs.writeFileSync(path.join(OUT, 'icon.ico'), Buffer.concat([header, ...images]));
+console.log('만듦: public/icon.ico');

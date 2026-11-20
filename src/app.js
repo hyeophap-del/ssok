@@ -16,6 +16,7 @@ import { APP_NAME, APP_ID } from './brand.js';
 
 export const VERSION = '1.0.0';
 const COOKIE = APP_ID;
+const LEGACY_COOKIE = 'gf'; // 예전 이름(Galaxy File) 때 휴대폰에 저장된 쿠키도 받아 준다
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60; // 브라우저가 허용하는 최대치(400일)
 const MAX_TEXT = 100_000;
 const PART_SUFFIX = `.${APP_ID}-part`;
@@ -115,6 +116,8 @@ async function freeSpace(dir) {
  * @param {() => void} [options.announce]       주변 PC 다시 찾기
  * @param {() => void} [options.showHostPage]   연결 요청이 왔는데 PC 화면이 닫혀 있을 때 화면 열기
  * @param {{pairTimeoutMs?: number, verifyCooldownMs?: number}} [options.peerOptions]  테스트용 시간 설정
+ * @param {{get: () => object, set: (patch: object) => Promise<void>}} [options.settings]  PC 화면의 설정 (이름, 자동 실행)
+ * @param {() => void} [options.onQuit]  PC 화면에서 '끄기'를 눌렀을 때
  * @param {(type: string, payload?: any) => void} [options.log]
  */
 export function createApp(options) {
@@ -134,6 +137,8 @@ export function createApp(options) {
     announce = () => {},
     showHostPage = () => {},
     peerOptions = {},
+    settings = null,
+    onQuit = null,
     log = () => {},
   } = options;
 
@@ -199,7 +204,8 @@ export function createApp(options) {
     // PC 자신의 요청이라도 다른 웹사이트가 몰래 보낸 요청이면 믿지 않는다.
     const site = req.headers['sec-fetch-site'];
     const trustedSite = !site || site === 'same-origin' || site === 'none';
-    const cookieOk = safeEqual(parseCookies(req.headers.cookie)[COOKIE], token);
+    const cookies = parseCookies(req.headers.cookie);
+    const cookieOk = safeEqual(cookies[COOKIE], token) || safeEqual(cookies[LEGACY_COOKIE], token);
     const queryOk = safeEqual(url.searchParams.get('k') ?? undefined, token);
     return {
       isHost,
@@ -238,6 +244,13 @@ export function createApp(options) {
     if (pathname === '/api/events' && method === 'GET') return events(req, res, ctx);
     if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
+    if (pathname === '/api/settings' && (method === 'GET' || method === 'POST')) return settingsApi(req, res, ctx);
+    if (pathname === '/api/quit' && method === 'POST') {
+      rejectBody(req, res);
+      if (!ctx.isHost || !onQuit) return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
+      res.on('finish', () => setTimeout(onQuit, 100));
+      return sendEmpty(res);
+    }
     if (pathname === '/api/open-folder' && method === 'POST') {
       rejectBody(req, res);
       if (!ctx.isHost) return sendJson(res, 403, { error: 'PC에서만 할 수 있어요.' });
@@ -270,7 +283,42 @@ export function createApp(options) {
       const url = `http://${address}:${port}/?k=${token}`;
       return { address, iface, url, qrSvg: toSvg(encodeQR(url)) };
     });
-    return { ...info, receivedDir, addresses, port, name: self.name, peerSupport: Boolean(peers), warnings: warnings() };
+    return {
+      ...info,
+      receivedDir,
+      addresses,
+      port,
+      name: self.name,
+      peerSupport: Boolean(peers),
+      settings: settings?.get() ?? null,
+      canQuit: Boolean(onQuit),
+      warnings: warnings(),
+    };
+  }
+
+  async function settingsApi(req, res, ctx) {
+    if (!ctx.isHost || !settings) {
+      rejectBody(req, res);
+      return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
+    }
+    if (req.method === 'POST') {
+      let patch;
+      try {
+        patch = JSON.parse(await readBody(req, 4096));
+      } catch {
+        return sendJson(res, 400, { error: '잘못된 요청이에요.' });
+      }
+      try {
+        await settings.set({
+          name: typeof patch?.name === 'string' ? patch.name : undefined,
+          autostart: typeof patch?.autostart === 'boolean' ? patch.autostart : undefined,
+        });
+      } catch (err) {
+        if (!err.status) log('error', err);
+        return sendJson(res, err.status || 500, { error: err.status ? err.message : '설정을 바꾸지 못했어요.' });
+      }
+    }
+    return sendJson(res, 200, settings.get());
   }
 
   // ---- 실시간 알림 (Server-Sent Events) ----

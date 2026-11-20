@@ -362,3 +362,17 @@ test('접속한 기기 이름을 실제 브라우저 UA로 구분한다', () => 
   assert.equal(deviceLabel(windows), '다른 PC');
   assert.equal(deviceLabel(undefined), '다른 기기');
 });
+
+test('예전 이름(Galaxy File) 때 저장된 휴대폰 쿠키로도 접속된다', async () => {
+  const res = await request(remote, { path: '/api/session', headers: { Cookie: `gf=${TOKEN}` } });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.isHost, false);
+  const wrong = await request(remote, { path: '/api/session', headers: { Cookie: 'gf=wrong' } });
+  assert.equal(wrong.status, 401);
+});
+
+test('설정·끄기는 PC 화면에서만 된다', async () => {
+  assert.equal((await request(remote, { path: '/api/settings', headers: cookie })).status, 403);
+  const quit = await request(remote, { method: 'POST', path: '/api/quit', headers: { ...cookie, ...XRW } });
+  assert.equal(quit.status, 403);
+});

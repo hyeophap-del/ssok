@@ -15,7 +15,15 @@ import { startDiscovery } from './src/discovery.js';
 import { loadIdentity } from './src/tls.js';
 import { encodeQR, toTerminal } from './src/qr.js';
 import { openUrl, openPath, revealPath } from './src/open.js';
-import { publicNetworkAdapters } from './src/windows.js';
+import {
+  publicNetworkAdapters,
+  shortcutsSupported,
+  startMenuShortcut,
+  startupShortcut,
+  createShortcut,
+  removeShortcut,
+} from './src/windows.js';
+import { spawn } from 'node:child_process';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8765;
@@ -25,6 +33,8 @@ ${APP_NAME} ${VERSION} — PC·휴대폰 사이 무선 파일 공유
 
 사용법: node server.js [옵션]
 
+  --launch           창 없이 뒤에서 실행하고 PC 화면을 연다 (이미 실행 중이면 화면만 연다).
+                     처음 실행할 때 시작 메뉴 바로가기와 'PC 켤 때 자동 실행'을 등록한다.
   --dir <폴더>       휴대폰에서 받은 파일을 저장할 폴더 (기본: 다운로드\\${RECEIVED_DIR_NAME}, 한 번 정하면 기억)
   --port <번호>      사용할 포트 (기본: ${DEFAULT_PORT})
   --host <주소>      접속을 받을 주소 (기본: 0.0.0.0 = 모든 네트워크, 127.0.0.1 = 이 PC만)
@@ -44,6 +54,8 @@ function parseCli() {
         name: { type: 'string' },
         'no-open': { type: 'boolean' },
         'reset-token': { type: 'boolean' },
+        launch: { type: 'boolean' },
+        background: { type: 'boolean' }, // --launch가 띄우는 뒤쪽 프로세스 (직접 쓰지 않는다)
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -74,6 +86,81 @@ function writeJson(file, data) {
   fs.renameSync(tmp, file);
 }
 
+/** 설정을 저장한다. 다른 프로세스(실행기·뒤쪽 서버)가 적어 둔 값은 지우지 않고 합친다. */
+function saveConfig(file, config) {
+  writeJson(file, { ...(readJson(file) ?? {}), ...config });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 시작 메뉴·자동 실행 바로가기: 지금 이 node.exe와 이 폴더의 server.js를 --launch로 실행한다 */
+function createLaunchShortcut(file, extraArgs = []) {
+  return createShortcut({
+    file,
+    target: process.execPath,
+    args: [`"${path.join(ROOT, 'server.js')}"`, '--launch', ...extraArgs].join(' '),
+    workingDir: ROOT,
+    icon: path.join(ROOT, 'public', 'icon.ico'),
+    description: `${APP_NAME} — 휴대폰·PC와 파일 주고받기`,
+  });
+}
+
+/** 처음 실행했거나 프로그램 폴더를 옮겼으면 바로가기를 (다시) 만든다 */
+async function ensureShortcuts(configPath) {
+  if (!shortcutsSupported()) return;
+  const config = readJson(configPath) ?? {};
+  const location = `${process.execPath}|${ROOT}`;
+  const menu = startMenuShortcut(APP_NAME);
+  const startup = startupShortcut(APP_NAME);
+  if (config.shortcutsFor === location && fs.existsSync(menu)) return;
+  await createLaunchShortcut(menu);
+  // 처음에는 'PC 켤 때 자동 실행'을 켠다 (PC 화면의 설정에서 끌 수 있다). 폴더를 옮겼으면 기존 선택을 따른다.
+  const autostart = config.autostart ?? true;
+  if (autostart) await createLaunchShortcut(startup, ['--no-open']);
+  saveConfig(configPath, { shortcutsFor: location, autostart });
+}
+
+/**
+ * 창 없이 뒤에서 실행하고 PC 화면을 연다. 이미 실행 중이면 화면만 연다.
+ * 시작 메뉴 바로가기, 자동 실행, 배포용 실행 파일이 모두 이 방식으로 실행한다.
+ */
+async function launch(args, home, configPath) {
+  const portOf = () => (args.port ? Number(args.port) : (readJson(configPath)?.port ?? DEFAULT_PORT));
+  let port = portOf();
+  let running = await pingApp({ address: '127.0.0.1', port });
+  if (!running) {
+    const logFile = path.join(home, `${APP_ID}.log`);
+    try {
+      if (fs.statSync(logFile).size > 1024 * 1024) fs.renameSync(logFile, `${logFile}.old`);
+    } catch {
+      // 기록 파일이 아직 없다
+    }
+    const out = fs.openSync(logFile, 'a');
+    const passthrough = ['port', 'host'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, args[k]] : []));
+    const child = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--background', '--no-open', ...passthrough], {
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', out, out],
+    });
+    child.unref();
+    fs.closeSync(out);
+    // 뜰 때까지 기다린다 (포트가 바뀌었을 수 있어 설정을 다시 읽는다)
+    for (let i = 0; i < 60 && !running && child.exitCode === null; i++) {
+      await sleep(250);
+      port = portOf();
+      running = await pingApp({ address: '127.0.0.1', port }, { timeout: 1000 });
+    }
+    if (!running) {
+      console.error(`${APP_NAME} 프로그램을 시작하지 못했어요. 기록: ${logFile}`);
+      openPath(logFile);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  if (!args['no-open']) openUrl(`http://localhost:${port}/`);
+  await ensureShortcuts(configPath).catch((err) => console.error(`바로가기를 만들지 못했어요: ${err.message}`));
+}
+
 /** 예전 이름(Galaxy File)으로 쓰던 설정·목록·받은 파일 폴더를 그대로 이어 쓴다 */
 function migrateLegacyHome(home) {
   if (process.env.SSOK_HOME || !process.env.LOCALAPPDATA) return;
@@ -84,19 +171,30 @@ function migrateLegacyHome(home) {
   } catch {
     return; // 옮기지 못하면 새로 시작한다
   }
+  const moves = [[legacy, home]];
+  // 기본 위치(다운로드\Galaxy File)에 받아 둔 파일은 새 이름의 폴더로 옮긴다. 옮기지 못하면 예전 폴더를 계속 쓴다.
   const configPath = path.join(home, 'config.json');
   const config = readJson(configPath);
   const oldReceived = path.join(os.homedir(), 'Downloads', 'Galaxy File');
+  const newReceived = path.join(os.homedir(), 'Downloads', RECEIVED_DIR_NAME);
   if (config && !config.dir && fs.existsSync(oldReceived)) {
-    config.dir = oldReceived;
-    writeJson(configPath, config);
+    try {
+      if (fs.existsSync(newReceived)) throw new Error('이미 있음');
+      fs.renameSync(oldReceived, newReceived);
+      moves.push([oldReceived, newReceived]);
+    } catch {
+      config.dir = oldReceived;
+      writeJson(configPath, config);
+    }
   }
-  // 목록에 적힌 '휴대폰으로 보낼 파일' 경로도 새 폴더로 고친다
+  // 목록에 적힌 파일 경로도 옮긴 폴더로 고친다
   const itemsPath = path.join(home, 'items.json');
   const items = readJson(itemsPath);
   if (Array.isArray(items?.items)) {
     for (const item of items.items) {
-      if (typeof item.path === 'string' && item.path.startsWith(legacy + path.sep)) item.path = home + item.path.slice(legacy.length);
+      if (typeof item.path !== 'string') continue;
+      const move = moves.find(([from]) => item.path.startsWith(from + path.sep));
+      if (move) item.path = move[1] + item.path.slice(move[0].length);
     }
     writeJson(itemsPath, items);
   }
@@ -188,7 +286,13 @@ async function main() {
   if (args.dir) config.dir = path.resolve(args.dir);
   if (!config.id) config.id = newPeerId();
   if (args.name !== undefined) config.name = cleanName(args.name) || undefined;
-  const pcName = config.name || cleanName(os.hostname()) || '내 PC';
+  let pcName = config.name || cleanName(os.hostname()) || '내 PC';
+
+  if (args.launch) {
+    saveConfig(configPath, config); // 뒤에서 뜰 프로세스가 같은 설정(접속 코드 등)을 쓰도록 먼저 저장
+    return launch(args, home, configPath);
+  }
+  if (args.background) console.log(`\n=== ${APP_NAME} ${VERSION} 시작 ${new Date().toLocaleString('ko-KR')} ===`);
 
   const receivedDir = config.dir ?? path.join(os.homedir(), 'Downloads', RECEIVED_DIR_NAME);
   const outboxDir = path.join(home, 'outbox');
@@ -221,6 +325,7 @@ async function main() {
   const publicCheck = localOnly ? Promise.resolve() : checkNetworks();
   if (!localOnly) setInterval(checkNetworks, 60_000).unref(); // 설정을 바꾸면 1분 안에 경고가 사라진다
 
+  const self = { id: config.id, name: pcName }; // 이름은 PC 화면에서 바꿀 수 있다
   const app = createApp({
     token: config.token,
     receivedDir,
@@ -230,8 +335,29 @@ async function main() {
     lanAddresses: () => (localOnly ? [{ address: '127.0.0.1', iface: '이 PC에서만 (--host 127.0.0.1)' }] : lanAddresses()),
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
-    self: { id: config.id, name: pcName },
+    self,
     tls: identity,
+    settings: {
+      get: () => ({
+        name: pcName,
+        autostart: shortcutsSupported() ? fs.existsSync(startupShortcut(APP_NAME)) : null,
+      }),
+      set: async ({ name, autostart }) => {
+        if (name !== undefined) {
+          const clean = cleanName(name);
+          if (!clean) throw Object.assign(new Error('이름을 입력해 주세요.'), { status: 400 });
+          pcName = self.name = config.name = clean;
+          discovery?.announce(); // 주변 PC 목록에 새 이름이 바로 보이게
+        }
+        if (autostart !== undefined && shortcutsSupported()) {
+          if (autostart) await createLaunchShortcut(startupShortcut(APP_NAME), ['--no-open']);
+          else removeShortcut(startupShortcut(APP_NAME));
+          config.autostart = Boolean(autostart);
+        }
+        saveConfig(configPath, config);
+      },
+    },
+    onQuit: () => shutdown(),
     peerBook,
     announce: () => discovery?.announce(),
     showHostPage: () => {
@@ -281,15 +407,17 @@ async function main() {
     process.exit(1);
   }
   config.port = port;
-  writeJson(configPath, config);
+  saveConfig(configPath, config);
 
   const addresses = localOnly ? [{ address: '127.0.0.1' }] : lanAddresses();
   const pcUrl = `http://localhost:${port}/`;
   console.log(`\n  ${APP_NAME} ${VERSION} 실행 중\n`);
   if (addresses.length) {
     const phoneUrl = `http://${addresses[0].address}:${port}/?k=${config.token}`;
-    console.log(toTerminal(encodeQR(phoneUrl)).replace(/^/gm, '  '));
-    console.log(`\n  휴대폰 카메라로 위 QR 코드를 스캔하세요 (PC 화면에도 같은 QR이 있어요)`);
+    if (process.stdout.isTTY) {
+      console.log(toTerminal(encodeQR(phoneUrl)).replace(/^/gm, '  '));
+      console.log(`\n  휴대폰 카메라로 위 QR 코드를 스캔하세요 (PC 화면에도 같은 QR이 있어요)`);
+    }
     console.log(`  휴대폰 주소   ${phoneUrl}`);
     for (const extra of addresses.slice(1)) console.log(`  다른 네트워크 http://${extra.address}:${port}/?k=${config.token}  (${extra.iface})`);
   } else {
@@ -300,7 +428,7 @@ async function main() {
   console.log(`  받은 파일     ${receivedDir}`);
   await publicCheck;
   for (const warning of networkWarnings) console.log(`\n  ⚠ ${warning}`);
-  console.log(`\n  이 창을 닫으면 공유가 멈춰요. 끝내려면 Ctrl+C\n`);
+  if (!args.background) console.log(`\n  이 창을 닫으면 공유가 멈춰요. 끝내려면 Ctrl+C\n`);
 
   // 같은 네트워크에서 이 프로그램을 켠 다른 PC 찾기
   if (!localOnly) {
@@ -321,7 +449,7 @@ async function main() {
   if (!args['no-open']) openUrl(pcUrl);
 
   let closing = false;
-  const shutdown = async () => {
+  async function shutdown() {
     if (closing) return;
     closing = true;
     try {
@@ -332,7 +460,7 @@ async function main() {
     discovery?.close();
     await Promise.race([app.close(), new Promise((r) => setTimeout(r, 1000))]);
     process.exit(0);
-  };
+  }
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   process.on('SIGHUP', shutdown); // Windows에서 창을 닫을 때

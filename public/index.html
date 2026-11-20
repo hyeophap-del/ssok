@@ -51,6 +51,22 @@
           </button>
         </section>
 
+        <section id="settings" class="card settings" hidden>
+          <h2>설정</h2>
+          <form id="name-form" class="setting">
+            <label for="pc-name">이 PC 이름 <span class="muted small">다른 PC와 휴대폰 앱에 보이는 이름</span></label>
+            <div class="connect-row">
+              <input id="pc-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" required>
+              <button class="btn" type="submit">저장</button>
+            </div>
+          </form>
+          <label id="autostart-row" class="switch-row" hidden>
+            <input id="autostart" type="checkbox">
+            <span>PC를 켜면 자동으로 실행<br><span class="muted small">꺼져 있으면 휴대폰에서 보내도 받지 못해요</span></span>
+          </label>
+          <button id="quit" class="btn small quit" type="button" hidden>{{APP_NAME}} 끄기</button>
+        </section>
+
         <details class="card help">
           <summary>휴대폰에서 접속이 안 되나요?</summary>
           <ol>

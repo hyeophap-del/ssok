@@ -191,6 +191,16 @@ p { margin: 0; }
   word-break: break-all;
 }
 
+/* ---- 설정 ---- */
+.settings { display: grid; gap: 14px; }
+.settings > h2 + * { margin-top: 0; }
+.setting { display: grid; gap: 6px; }
+.setting label { font-size: 13px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
+.switch-row { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+.switch-row input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--accent); flex: none; }
+.btn.quit { justify-self: start; color: var(--danger); }
+.setting .connect-row input { font: inherit; font-size: 14px; }
+
 .help summary { cursor: pointer; font-weight: 700; list-style: none; display: flex; justify-content: space-between; }
 .help summary::-webkit-details-marker { display: none; }
 .help summary::after { content: "+"; color: var(--muted); font-weight: 400; }
