@@ -170,6 +170,7 @@ export function createApp(options) {
     onQuit = null,
     updater = null, // { state(), check(), apply() } — exe로 설치했을 때만
     onShow = null, // PC 화면 창을 열거나 앞으로 가져오기 (시작 메뉴로 다시 실행했을 때)
+    openLog = null, // 접속 코드를 가린 실행 기록을 열기 (문제가 생겼을 때 보내 달라고 할 파일)
     onHostPagesClosed = () => {}, // 열려 있던 PC 화면이 모두 닫혔을 때
     log = () => {},
   } = options;
@@ -290,6 +291,16 @@ export function createApp(options) {
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
     if (pathname === '/api/settings' && (method === 'GET' || method === 'POST')) return settingsApi(req, res, ctx);
     if (pathname.startsWith('/api/update')) return updateApi(req, res, url, ctx);
+    if (pathname === '/api/open-log' && method === 'POST') {
+      rejectBody(req, res);
+      if (!ctx.isHost || !openLog) return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
+      try {
+        openLog();
+      } catch (err) {
+        return sendJson(res, err.status || 500, { error: err.status ? err.message : '기록을 열지 못했어요.' });
+      }
+      return sendEmpty(res);
+    }
     if (pathname === '/api/show' && method === 'POST') {
       rejectBody(req, res);
       if (!ctx.isHost || !onShow) return sendJson(res, 403, { error: 'PC에서만 할 수 있어요.' });
@@ -345,6 +356,7 @@ export function createApp(options) {
       name: self.name,
       peerSupport: Boolean(peers),
       settings: settings?.get() ?? null,
+      canOpenLog: Boolean(openLog),
       update: updater?.state() ?? null,
       canQuit: Boolean(onQuit),
       warnings: warnings(),

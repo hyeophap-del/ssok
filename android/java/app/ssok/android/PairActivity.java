@@ -112,7 +112,7 @@ public class PairActivity extends Activity {
                 fail(second.json.optString("error", "연결하지 못했어요. 다시 시도해 주세요."));
             }
         } catch (Exception e) {
-            fail("PC에 연결하지 못했어요. 휴대폰과 PC가 같은 Wi-Fi에 있는지 확인해 주세요.");
+            fail("PC에 연결하지 못했어요. 휴대폰과 PC가 같은 Wi-Fi에 있는지 확인해 주세요.\n\n(원인: " + Net.describe(e) + ")");
         } finally {
             busy = false;
         }

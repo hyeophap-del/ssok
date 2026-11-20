@@ -130,7 +130,7 @@ public class UploadService extends Service {
                 } catch (RejectedException e) {
                     lastError = e.getMessage();
                 } catch (Exception e) {
-                    lastError = pc.name + "에 연결하지 못했어요. PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요.";
+                    lastError = pc.name + "에 연결하지 못했어요. PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요.\n(원인: " + Net.describe(e) + ")";
                     break; // 연결이 안 되면 남은 파일도 안 된다
                 }
             }
@@ -141,7 +141,7 @@ public class UploadService extends Service {
             Store.remove(this, pc.id);
             result("PC에서 연결이 해제됐어요", pc.name + "에 다시 연결해 주세요.", true);
         } catch (Exception e) {
-            result("보내지 못했어요", pc.name + "에 연결하지 못했어요. PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요.", true);
+            result("보내지 못했어요", pc.name + "에 연결하지 못했어요. PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요.\n(원인: " + Net.describe(e) + ")", true);
         } finally {
             wifi.release();
             wake.release();

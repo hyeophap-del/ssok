@@ -79,6 +79,14 @@ final class Net {
         return String.format("%06d", value % 1_000_000L);
     }
 
+    /** 문제를 찾을 때 보여 줄 오류 원인 한 줄 (가장 안쪽 원인까지 따라간다) */
+    static String describe(Throwable error) {
+        Throwable root = error;
+        while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+        String text = root.getClass().getSimpleName() + (root.getMessage() != null ? ": " + root.getMessage() : "");
+        return text.length() > 160 ? text.substring(0, 160) + "…" : text;
+    }
+
     static String formatCode(String code) {
         return code.length() == 6 ? code.substring(0, 3) + " " + code.substring(3) : code;
     }

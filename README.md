@@ -122,6 +122,15 @@ node server.js [옵션]        (start.bat 뒤에 붙여도 됩니다)
 
 보안 문제를 발견하면 공개 이슈 대신 GitHub의 [비공개 취약점 신고](https://github.com/hyeophap-del/ssok/security/advisories/new)로 알려 주세요.
 
+## 개인 정보
+
+- 파일과 텍스트는 **같은 네트워크 안의 기기끼리만** 오갑니다. 어떤 서버도 거치지 않습니다.
+- 쏙이 인터넷에 연결하는 곳은 **하루 한 번 GitHub에서 새 버전을 확인**하는 것뿐입니다([설정]에서 끌 수 있음).
+  이때 GitHub는 여느 웹사이트처럼 접속한 IP 주소를 볼 수 있습니다. 안드로이드 앱은 연결한 PC하고만 통신합니다.
+- 사용 기록 수집, 광고, 회원 가입이 없습니다. 모든 자료는 이 PC(아래 ‘파일 위치’)와 휴대폰 안에만 있습니다.
+- 문제가 생겨 PC 화면 [설정]의 **[문제 기록 열기]** 로 기록을 보낼 때는, 접속 코드를 가린 파일이 열립니다.
+  기록에는 주고받은 파일 이름과 기기 이름이 들어 있으니 보내기 전에 한번 훑어보세요.
+
 ## 파일 위치
 
 | 무엇 | 어디 |
@@ -177,6 +186,8 @@ Android SDK의 `platforms;android-35`, `build-tools;35.0.0`(`ANDROID_HOME` 또�
 | `src/files.js` | 파일 이름 정리, 이름 겹침 처리, MIME |
 | `src/net.js` | 휴대폰이 접속할 IP 고르기, Host 헤더 검사, 브로드캐스트 주소 |
 | `src/store.js` | 주고받은 목록 저장 |
+| `src/logs.js` | 보낼 실행 기록에서 접속 코드 가리기 |
+| `src/window.js` | 전용 창(Chrome·Edge 앱 창) 열기, 알림 영역 아이콘 |
 | `src/open.js`, `src/windows.js` | 탐색기·브라우저 열기, 공용 네트워크 감지, 시작 메뉴·자동 실행 바로가기 |
 | `public/` | 웹 화면 (PC·휴대폰 공용) |
 | `scripts/make-icons.mjs` | `icon.svg`와 같은 모양의 PNG·ICO 아이콘 생성 |

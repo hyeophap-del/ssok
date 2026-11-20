@@ -781,6 +781,10 @@ function setupSettings() {
       }
     });
   }
+  if (state.session.canOpenLog) {
+    $('log-row').hidden = false;
+    $('open-log').addEventListener('click', () => post('/api/open-log').catch(showError));
+  }
   if (state.session.update) renderUpdate(state.session.update);
   $('update-apply').addEventListener('click', applyUpdate);
 

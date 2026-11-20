@@ -16,6 +16,7 @@ import { loadIdentity } from './src/tls.js';
 import { encodeQR, toTerminal } from './src/qr.js';
 import { openPath, revealPath } from './src/open.js';
 import { openAppWindow, startTray } from './src/window.js';
+import { redactLog } from './src/logs.js';
 import {
   publicNetworkAdapters,
   shortcutsSupported,
@@ -206,6 +207,27 @@ async function launch(args, home, configPath) {
   }
   if (!args['no-open']) await askToShow(port);
   await ensureShortcuts(configPath).catch((err) => console.error(`바로가기를 만들지 못했어요: ${err.message}`));
+}
+
+/**
+ * 문제가 생겼을 때 보내 달라고 할 기록 파일을 만들어 메모장으로 연다.
+ * 실행 기록에는 휴대폰 접속 주소(접속 코드 포함)가 찍혀 있으므로 접속 코드는 가린다.
+ */
+function openLogForSharing(home, token) {
+  const logFile = path.join(home, `${APP_ID}.log`);
+  const parts = [`${logFile}.old`, logFile].filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8'));
+  if (!parts.length) throw Object.assign(new Error('아직 기록이 없어요. 시작 메뉴의 쏙으로 실행했을 때부터 기록이 남아요.'), { status: 404 });
+  let text = parts.join('\n');
+  text = redactLog(text, token).slice(-200_000);
+  const header = [
+    `${APP_NAME} ${VERSION} 실행 기록 · ${new Date().toLocaleString('ko-KR')}`,
+    `Windows ${os.release()} · ${EXE ? 'exe' : 'Node.js ' + process.version}`,
+    '접속 코드는 ●●●●로 가렸어요. 이 파일을 그대로 보내 주세요.',
+    '',
+  ].join('\r\n');
+  const out = path.join(home, '문제 기록.txt');
+  fs.writeFileSync(out, String.fromCharCode(0xfeff) + header + '\r\n' + text.replace(/\r?\n/g, '\r\n'));
+  openPath(out);
 }
 
 /** 예전 이름(Galaxy File)으로 쓰던 설정·목록·받은 파일 폴더를 그대로 이어 쓴다 */
@@ -444,6 +466,7 @@ async function main() {
     },
     onQuit: () => shutdown(),
     onShow: () => showWindow(),
+    openLog: () => openLogForSharing(home, config.token),
     onHostPagesClosed: () => {
       // 창을 처음 닫았을 때 한 번만: 꺼진 게 아니라 알림 영역에서 계속 받고 있다고 알려 준다
       if (!tray || config.trayHintShown) return;
