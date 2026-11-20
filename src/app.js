@@ -249,7 +249,8 @@ export function createApp(options) {
 
     if (pathname === '/api/ping') {
       rejectBody(req, res);
-      return sendJson(res, 200, { app: APP_ID, version: VERSION, id: self.id, name: self.name });
+      // 이 PC에서 물어보면 실행 파일 위치도 알려 준다 (새 버전 exe가 예전 것을 바꿀 때 쓴다)
+      return sendJson(res, 200, { app: APP_ID, version: VERSION, id: self.id, name: self.name, ...(ctx.isHost ? { exe: process.execPath } : {}) });
     }
     if (peers && (await peers.handlePublic(req, res, url))) return;
     if (!ctx.authed) {

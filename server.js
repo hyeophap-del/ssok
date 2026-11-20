@@ -24,9 +24,15 @@ import {
   removeShortcut,
 } from './src/windows.js';
 import { spawn } from 'node:child_process';
+import { isExe, extractAssets, installedExePath, samePath, copyWithRetry } from './src/exe.js';
+import { requestJson } from './src/peers.js';
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// exe로 배포했을 때는 코드와 화면 파일이 exe 안에 있다 (화면 파일은 처음 실행할 때 풀어 둔다)
+const EXE = isExe();
+let ROOT = EXE ? null : path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 8765;
+/** 같은 프로그램을 다시 실행할 때 붙이는 인자 (node.exe로 실행할 때는 server.js 경로가 필요하다) */
+const selfArgs = () => (EXE ? [] : [path.join(ROOT, 'server.js')]);
 
 const HELP = `
 ${APP_NAME} ${VERSION} — PC·휴대폰 사이 무선 파일 공유
@@ -93,14 +99,14 @@ function saveConfig(file, config) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 시작 메뉴·자동 실행 바로가기: 지금 이 node.exe와 이 폴더의 server.js를 --launch로 실행한다 */
+/** 시작 메뉴·자동 실행 바로가기: 지금 이 프로그램(exe, 또는 node.exe + server.js)을 --launch로 실행한다 */
 function createLaunchShortcut(file, extraArgs = []) {
   return createShortcut({
     file,
     target: process.execPath,
-    args: [`"${path.join(ROOT, 'server.js')}"`, '--launch', ...extraArgs].join(' '),
-    workingDir: ROOT,
-    icon: path.join(ROOT, 'public', 'icon.ico'),
+    args: [...selfArgs().map((a) => `"${a}"`), '--launch', ...extraArgs].join(' '),
+    workingDir: EXE ? path.dirname(process.execPath) : ROOT,
+    icon: EXE ? process.execPath : path.join(ROOT, 'public', 'icon.ico'),
     description: `${APP_NAME} — 휴대폰·PC와 파일 주고받기`,
   });
 }
@@ -109,7 +115,7 @@ function createLaunchShortcut(file, extraArgs = []) {
 async function ensureShortcuts(configPath) {
   if (!shortcutsSupported()) return;
   const config = readJson(configPath) ?? {};
-  const location = `${process.execPath}|${ROOT}`;
+  const location = EXE ? process.execPath : `${process.execPath}|${ROOT}`;
   const menu = startMenuShortcut(APP_NAME);
   const startup = startupShortcut(APP_NAME);
   if (config.shortcutsFor === location && fs.existsSync(menu)) return;
@@ -128,6 +134,30 @@ async function launch(args, home, configPath) {
   const portOf = () => (args.port ? Number(args.port) : (readJson(configPath)?.port ?? DEFAULT_PORT));
   let port = portOf();
   let running = await pingApp({ address: '127.0.0.1', port });
+
+  // 받은 exe를 처음 실행했으면 사용자 폴더에 설치하고, 설치한 exe로 다시 실행한다.
+  // (다운로드 폴더의 exe는 지워도 되고, 방화벽 허용도 설치한 위치 기준으로 한 번만 하면 된다)
+  const installed = EXE && process.platform === 'win32' ? installedExePath() : null;
+  if (installed && !samePath(process.execPath, installed)) {
+    if (running && running.version === VERSION && running.exe && samePath(running.exe, installed)) {
+      if (!args['no-open']) openUrl(`http://localhost:${port}/`);
+      return; // 같은 버전이 이미 설치되어 돌고 있다
+    }
+    if (running) {
+      // 예전 버전(또는 다른 위치의 쏙)이 돌고 있으면 끄고 바꾼다
+      await requestJson({ address: '127.0.0.1', port }, { method: 'POST', path: '/api/quit', timeout: 3000 }).catch(() => {});
+      for (let i = 0; i < 40 && (await pingApp({ address: '127.0.0.1', port }, { timeout: 500 })); i++) await sleep(250);
+    }
+    await copyWithRetry(process.execPath, installed);
+    const passthrough = ['port', 'host'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, args[k]] : []));
+    spawn(installed, ['--launch', ...(args['no-open'] ? ['--no-open'] : []), ...passthrough], {
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+    }).unref();
+    return;
+  }
+
   if (!running) {
     const logFile = path.join(home, `${APP_ID}.log`);
     try {
@@ -137,7 +167,7 @@ async function launch(args, home, configPath) {
     }
     const out = fs.openSync(logFile, 'a');
     const passthrough = ['port', 'host'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, args[k]] : []));
-    const child = spawn(process.execPath, [path.join(ROOT, 'server.js'), '--background', '--no-open', ...passthrough], {
+    const child = spawn(process.execPath, [...selfArgs(), '--background', '--no-open', ...passthrough], {
       detached: true,
       windowsHide: true,
       stdio: ['ignore', out, out],
@@ -276,10 +306,13 @@ async function main() {
     console.log(HELP);
     return;
   }
+  // exe는 창이 없는 프로그램이라, 그냥 더블클릭하면 --launch로 동작한다
+  if (EXE && !args.background) args.launch = true;
 
   const home = appHome();
   migrateLegacyHome(home);
   fs.mkdirSync(home, { recursive: true });
+  if (EXE) ROOT = extractAssets(home, VERSION);
   const configPath = path.join(home, 'config.json');
   const config = readJson(configPath) ?? {};
   if (!config.token || args['reset-token']) config.token = newToken();
