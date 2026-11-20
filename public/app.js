@@ -164,6 +164,13 @@ function setupRemote() {
   } else if (!store.get(TIP_KEY, false) && !standalone) {
     $('install-tip').hidden = false;
   }
+
+  if (state.session.shortcutUrl && /iPhone|iPad/i.test(navigator.userAgent)) {
+    // 아이폰은 앱 대신 '단축어'로 공유 메뉴에 보내기를 만든다
+    $('ios-card').hidden = false;
+    $('ios-url').textContent = state.session.shortcutUrl;
+    $('ios-copy').addEventListener('click', () => copyAndReport(state.session.shortcutUrl));
+  }
   $('install-tip-close').addEventListener('click', () => {
     $('install-tip').hidden = true;
     store.set(TIP_KEY, true);

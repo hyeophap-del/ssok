@@ -72,12 +72,36 @@ function parseCookies(header = '') {
 }
 
 export function deviceLabel(ua = '') {
-  if (/iPhone/i.test(ua)) return 'iPhone';
+  if (/iPhone/i.test(ua) || /CFNetwork|Darwin/i.test(ua)) return 'iPhone'; // CFNetwork: 아이폰 '단축어' 앱
   if (/iPad/i.test(ua)) return 'iPad';
   if (/Android/i.test(ua)) return /Mobile/i.test(ua) ? '휴대폰' : '태블릿';
   if (/Windows/i.test(ua)) return '다른 PC';
   if (/Macintosh/i.test(ua)) return 'Mac';
   return '다른 기기';
+}
+
+const EXTENSIONS = {
+  'image/jpeg': 'jpg',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+  'application/zip': 'zip',
+};
+
+/** 이름 없이 온 파일의 이름: "iPhone 2026-11-21 003612.jpg" */
+function autoName(device, type) {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return sanitizeFilename(`${device} ${stamp}.${EXTENSIONS[type] || 'bin'}`);
 }
 
 function publicItem(item) {
@@ -212,6 +236,8 @@ export function createApp(options) {
       isHost,
       authed: cookieOk || queryOk || (isHost && trustedSite),
       giveCookie: queryOk && !cookieOk,
+      // 주소에 접속 코드를 담아 보낸 요청(아이폰 단축어 등). 브라우저가 몰래 붙여 보내는 쿠키가 아니므로 CSRF 걱정이 없다.
+      byQuery: queryOk,
       device: isHost ? 'PC' : deviceLabel(req.headers['user-agent']),
     };
   }
@@ -230,7 +256,7 @@ export function createApp(options) {
       rejectBody(req, res);
       return sendJson(res, 401, { error: 'PC 화면의 QR 코드를 다시 스캔해 주세요.' });
     }
-    if (method !== 'GET' && method !== 'HEAD') {
+    if (method !== 'GET' && method !== 'HEAD' && !ctx.byQuery) {
       // 다른 사이트가 보낸 위조 요청(CSRF) 차단: 이 헤더는 같은 출처의 스크립트만 붙일 수 있다.
       const origin = req.headers.origin;
       if (req.headers['x-requested-with'] !== APP_ID || (origin && origin !== `http://${req.headers.host}`)) {
@@ -240,7 +266,7 @@ export function createApp(options) {
     }
 
     if (peers && (await peers.handle(req, res, url, ctx))) return;
-    if (pathname === '/api/session' && method === 'GET') return sendJson(res, 200, session(ctx));
+    if (pathname === '/api/session' && method === 'GET') return sendJson(res, 200, session(ctx, req));
     if (pathname === '/api/items' && method === 'GET') return sendJson(res, 200, { items: store.list().map(publicItem) });
     if (pathname === '/api/events' && method === 'GET') return events(req, res, ctx);
     if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
@@ -276,9 +302,12 @@ export function createApp(options) {
     return sendJson(res, 404, { error: '없는 주소예요.' });
   }
 
-  function session(ctx) {
+  function session(ctx, req) {
     const info = { app: APP_ID, version: VERSION, isHost: ctx.isHost, device: ctx.device, androidApp: staticFiles.has(`${APP_ID}.apk`) };
-    if (!ctx.isHost) return info;
+    if (!ctx.isHost) {
+      // 아이폰 단축어에 넣을 보내기 주소. 이 휴대폰은 이미 이 접속 코드로 들어와 있으므로 새로 알려 주는 것은 없다.
+      return ctx.peer ? info : { ...info, shortcutUrl: `http://${req.headers.host}/api/upload?k=${token}` };
+    }
     const port = server.address().port;
     const addresses = lanAddresses().map(({ address, iface }) => {
       const url = `http://${address}:${port}/?k=${token}`;
@@ -394,7 +423,19 @@ export function createApp(options) {
       rejectBody(req, res);
       return sendJson(res, 411, { error: '파일 크기를 알 수 없어요.' });
     }
-    const name = sanitizeFilename(url.searchParams.get('name'));
+    // 아이폰 '단축어'처럼 이름 없이 보내면: 짧은 텍스트는 텍스트 항목으로, 나머지는 종류와 시각으로 이름을 붙인다
+    const rawName = url.searchParams.get('name');
+    const type = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (rawName === null && type === 'text/plain' && size <= MAX_TEXT * 4) {
+      let text;
+      try {
+        text = await readBody(req, MAX_TEXT * 4);
+      } catch {
+        return sendJson(res, 413, { error: '텍스트가 너무 길어요.' });
+      }
+      return addText(res, ctx, text);
+    }
+    const name = rawName === null ? autoName(ctx.device, type) : sanitizeFilename(rawName);
     const lastModified = Number(url.searchParams.get('lastModified'));
     const id = newId();
     const dir = ctx.isHost ? path.join(outboxDir, id) : receivedDir;
@@ -467,7 +508,11 @@ export function createApp(options) {
       if (err.code === 'TOO_LARGE') return sendJson(res, 413, { error: '텍스트가 너무 길어요. 파일로 보내 주세요.' });
       return sendJson(res, 400, { error: '잘못된 요청이에요.' });
     }
-    const text = typeof body?.text === 'string' ? body.text.replace(/\r\n?/g, '\n') : '';
+    return addText(res, ctx, typeof body?.text === 'string' ? body.text : '');
+  }
+
+  function addText(res, ctx, raw) {
+    const text = raw.replace(/\r\n?/g, '\n');
     if (!text.trim()) return sendJson(res, 400, { error: '보낼 내용이 없어요.' });
     if (text.length > MAX_TEXT) return sendJson(res, 413, { error: '텍스트가 너무 길어요. 파일로 보내 주세요.' });
 

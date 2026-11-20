@@ -376,3 +376,33 @@ test('설정·끄기는 PC 화면에서만 된다', async () => {
   const quit = await request(remote, { method: 'POST', path: '/api/quit', headers: { ...cookie, ...XRW } });
   assert.equal(quit.status, 403);
 });
+
+test('아이폰 단축어: 주소에 접속 코드를 담아 이름 없이 보내도 받는다', async () => {
+  const shortcut = { 'User-Agent': 'BackgroundShortcutRunner/1.0 CFNetwork/1568.200.51 Darwin/24.1.0' };
+  const photo = await request(remote, {
+    method: 'POST',
+    path: `/api/upload?k=${TOKEN}`,
+    headers: { ...shortcut, 'Content-Type': 'image/heic', 'Content-Length': 4 },
+    body: Buffer.from('HEIC'),
+  });
+  assert.equal(photo.status, 201, '단축어는 X-Requested-With 헤더를 붙이지 않아도 된다');
+  assert.match(photo.json.name, /^iPhone \d{4}-\d\d-\d\d \d{6}\.heic$/);
+  assert.equal(photo.json.device, 'iPhone');
+  assert.equal(fs.readFileSync(path.join(receivedDir, photo.json.name), 'utf8'), 'HEIC');
+
+  const text = await request(remote, {
+    method: 'POST',
+    path: `/api/upload?k=${TOKEN}`,
+    headers: { ...shortcut, 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength('공유한 링크 https://example.com') },
+    body: '공유한 링크 https://example.com',
+  });
+  assert.equal(text.status, 201);
+  assert.equal(text.json.kind, 'text');
+  assert.equal(text.json.text, '공유한 링크 https://example.com');
+
+  const wrong = await request(remote, { method: 'POST', path: '/api/upload?k=nope', headers: { 'Content-Length': 1 }, body: 'x' });
+  assert.equal(wrong.status, 401);
+
+  const session = await request(remote, { path: '/api/session', headers: cookie });
+  assert.equal(session.json.shortcutUrl, `http://127.0.0.1:${remote.port}/api/upload?k=${TOKEN}`);
+});
