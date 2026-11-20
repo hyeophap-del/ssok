@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 알림 표시줄 아이콘 (흰색 윤곽만 쓴다) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <path
+        android:pathData="M196,400 L196,112 M112,196 L196,112 L280,196 M316,112 L316,400 M232,316 L316,400 L400,316"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="52"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

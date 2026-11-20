@@ -50,3 +50,29 @@ test('두 PC가 서로를 찾는다 (나중에 켠 쪽이 인사하면 먼저 �
     b.close();
   }
 });
+
+test('휴대폰 앱이 PC를 찾으면 답만 하고, 주변 PC 목록에는 넣지 않는다', async () => {
+  const found = [];
+  const pc = await startDiscovery({
+    self: () => ({ id: 'a0a0a0a0a0a0a0a0', name: 'PC-A', port: 8765 }),
+    onPeer: (p) => found.push(p),
+    targets: () => [],
+    port: 0,
+    bindAddress: '127.0.0.1',
+  });
+  const dgram = await import('node:dgram');
+  const phone = dgram.createSocket('udp4');
+  await new Promise((r) => phone.bind(0, '127.0.0.1', r));
+  try {
+    const reply = new Promise((resolve) => phone.once('message', (buf) => resolve(JSON.parse(buf.toString('utf8')))));
+    phone.send(Buffer.from(JSON.stringify({ app: 'ssok', v: 1, t: 'find' })), pc.port, '127.0.0.1');
+    const answer = await reply;
+    assert.equal(answer.t, 'here');
+    assert.equal(answer.id, 'a0a0a0a0a0a0a0a0');
+    assert.equal(answer.port, 8765);
+    assert.deepEqual(found, []);
+  } finally {
+    phone.close();
+    pc.close();
+  }
+});

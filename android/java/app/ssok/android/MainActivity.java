@@ -1,0 +1,124 @@
+package app.ssok.android;
+
+import android.Manifest;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.text.InputType;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.Toast;
+
+import java.util.List;
+
+/** 연결된 PC 목록과 사용법 */
+public class MainActivity extends Activity {
+    private LinearLayout column;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        column = Ui.page(this);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            // 보내는 중 진행률과 결과를 알림으로 보여 준다
+            requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        render();
+    }
+
+    private void render() {
+        column.removeAllViews();
+        Ui.add(column, Ui.title(this, getString(R.string.app_name)), 0);
+        Ui.add(column, Ui.muted(this, "휴대폰에서 PC로 파일을 바로 보내요"), 4);
+
+        List<Store.Pc> pcs = Store.pcs(this);
+        LinearLayout how = Ui.card(this);
+        if (pcs.isEmpty()) {
+            Ui.add(how, Ui.heading(this, "PC와 연결하기"), 0);
+            Ui.add(how, Ui.body(this,
+                    "1. PC에서 쏙 프로그램을 켜요.\n"
+                            + "2. 휴대폰 카메라로 PC 화면의 QR 코드를 찍어요.\n"
+                            + "3. 열린 화면에서 [앱에 이 PC 연결]을 누르고, PC 화면의 6자리 숫자와 같으면 PC에서 [허용]을 눌러요."), 8);
+        } else {
+            Ui.add(how, Ui.heading(this, "보내는 방법"), 0);
+            Ui.add(how, Ui.body(this,
+                    "갤러리나 파일 앱에서 보낼 것을 고르고 공유 → 쏙을 누르세요.\n"
+                            + "화면이 꺼져도 끝까지 보내고, 다 보내면 알림으로 알려 줘요."), 8);
+        }
+        Ui.add(column, how, 20);
+
+        if (!pcs.isEmpty()) {
+            Ui.add(column, Ui.heading(this, "연결된 PC"), 24);
+            for (Store.Pc pc : pcs) {
+                LinearLayout card = Ui.card(this);
+                Ui.add(card, Ui.heading(this, pc.name), 0);
+                Ui.add(card, Ui.muted(this, pc.host + (pc.port == Net.DEFAULT_PORT ? "" : ":" + pc.port) + " · 암호화 연결"), 2);
+                Ui.add(card, Ui.button(this, "연결 해제", false, v -> confirmUnpair(pc)), 12);
+                Ui.add(column, card, 8);
+            }
+        }
+
+        Ui.add(column, Ui.button(this, pcs.isEmpty() ? "PC 주소로 직접 연결" : "다른 PC 연결", false, v -> askAddress()), 24);
+        Ui.add(column, Ui.muted(this, "QR 코드 아래에 적힌 주소(예: 192.168.0.32)를 넣으면 돼요."), 6);
+    }
+
+    private void askAddress() {
+        EditText input = new EditText(this);
+        input.setHint("192.168.0.32");
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        int pad = Ui.dp(this, 20);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(pad, Ui.dp(this, 8), pad, 0);
+        box.addView(input, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle("PC 주소")
+                .setView(box)
+                .setPositiveButton("연결", (d, w) -> {
+                    String text = input.getText().toString().trim().replaceFirst("^https?://", "").replaceFirst("/.*$", "");
+                    String host = text;
+                    String port = String.valueOf(Net.DEFAULT_PORT);
+                    int colon = text.lastIndexOf(':');
+                    if (colon > 0) {
+                        host = text.substring(0, colon);
+                        port = text.substring(colon + 1);
+                    }
+                    if (!Net.isValidHost(host) || !port.matches("\\d{1,5}")) {
+                        Toast.makeText(this, "주소를 확인해 주세요", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    Uri uri = new Uri.Builder().scheme("ssok").authority("pair").appendQueryParameter("host", host).appendQueryParameter("port", port).build();
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri, this, PairActivity.class));
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
+    private void confirmUnpair(Store.Pc pc) {
+        new AlertDialog.Builder(this)
+                .setTitle(pc.name + " 연결 해제")
+                .setMessage("다시 보내려면 처음처럼 연결해야 해요.")
+                .setPositiveButton("해제", (d, w) -> {
+                    Store.remove(this, pc.id);
+                    render();
+                    // PC에도 알린다 (꺼져 있으면 나중에 PC에서 지워도 된다)
+                    new Thread(() -> {
+                        try {
+                            Net.json(pc.host, pc.port, "POST", "/api/peer/unpair", null, pc.key, pc.fingerprint, 5000);
+                        } catch (Exception ignored) {
+                            // PC가 꺼져 있다
+                        }
+                    }).start();
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+}

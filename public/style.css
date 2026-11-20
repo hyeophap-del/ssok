@@ -354,6 +354,7 @@ p { margin: 0; }
 
 .tip { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; background: var(--accent-soft); border-color: transparent; box-shadow: none; }
 .tip p { margin-top: 4px; }
+.app-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; }
 .tip .icon-btn { margin: -8px -8px 0 0; }
 
 /* ---- 항목 목록 ---- */

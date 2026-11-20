@@ -7,6 +7,8 @@ const APP_ID = '{{APP_ID}}';
 const DOWNLOADED_KEY = `${APP_ID}.downloaded`;
 const TIP_KEY = `${APP_ID}.installTipClosed`;
 const TARGET_KEY = `${APP_ID}.target`;
+const APP_CARD_KEY = `${APP_ID}.appCardClosed`;
+const ANDROID_PACKAGE = 'app.ssok.android';
 const PREVIEWABLE_IMAGES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/bmp']);
 
 const store = {
@@ -143,7 +145,25 @@ function setupRemote() {
     });
   }
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
-  if (!store.get(TIP_KEY, false) && !standalone) $('install-tip').hidden = false;
+  const android = /Android/i.test(navigator.userAgent);
+  if (state.session.androidApp && android) {
+    // 안드로이드에서는 홈 화면 바로가기보다 앱이 훨씬 편하다 (공유 메뉴, 화면 꺼져도 전송)
+    if (!store.get(APP_CARD_KEY, false)) $('app-card').hidden = false;
+    // 앱이 있으면 앱의 연결 화면이 열리고, 없으면 이 화면으로 돌아와 설치 안내를 띄운다
+    const fallback = encodeURIComponent(`${location.origin}/#no-app`);
+    $('app-pair').href = `intent://pair?host=${location.hostname}&port=${location.port || 80}#Intent;scheme=ssok;package=${ANDROID_PACKAGE};S.browser_fallback_url=${fallback};end`;
+    $('app-card-close').addEventListener('click', () => {
+      $('app-card').hidden = true;
+      store.set(APP_CARD_KEY, true);
+    });
+    if (location.hash === '#no-app') {
+      history.replaceState(null, '', '/');
+      $('app-card').hidden = false;
+      toast('먼저 ① 앱 설치 파일을 받아 설치한 뒤 다시 눌러 주세요.', 'error');
+    }
+  } else if (!store.get(TIP_KEY, false) && !standalone) {
+    $('install-tip').hidden = false;
+  }
   $('install-tip-close').addEventListener('click', () => {
     $('install-tip').hidden = true;
     store.set(TIP_KEY, true);

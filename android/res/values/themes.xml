@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#3B62F0</item>
+        <item name="android:colorPrimary">#3B62F0</item>
+        <item name="android:statusBarColor">#F4F5F8</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#F4F5F8</item>
+        <item name="android:windowBackground">@color/background</item>
+    </style>
+    <!-- 공유 메뉴에서 누른 직후: 화면을 띄우지 않고 바로 보내기 시작 -->
+    <style name="AppTheme.Translucent" parent="@android:style/Theme.Material.Light.Dialog.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorAccent">#3B62F0</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+    <color name="background">#F4F5F8</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="text">#16181D</color>
+    <color name="muted">#6A7080</color>
+    <color name="accent">#3B62F0</color>
+    <color name="accent_soft">#E8EDFF</color>
+    <color name="border">#E3E6EC</color>
+</resources>

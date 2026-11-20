@@ -17,7 +17,10 @@ export function parseAnnouncement(buffer) {
   } catch {
     return null;
   }
-  if (msg?.app !== APP || (msg.t !== 'hello' && msg.t !== 'here')) return null;
+  if (msg?.app !== APP) return null;
+  // 휴대폰 앱이 IP가 바뀐 PC를 다시 찾을 때 보내는 질문. 앱은 PC가 아니므로 목록에 넣지 않고 답만 한다.
+  if (msg.t === 'find') return { type: 'find' };
+  if (msg.t !== 'hello' && msg.t !== 'here') return null;
   if (typeof msg.id !== 'string' || !PEER_ID.test(msg.id) || !isValidPort(msg.port)) return null;
   const name = cleanName(msg.name);
   if (!name) return null;
@@ -51,6 +54,10 @@ export async function startDiscovery({ self, onPeer, targets, port = DISCOVERY_P
   socket.on('message', (buffer, rinfo) => {
     const msg = parseAnnouncement(buffer);
     if (!msg || msg.id === self().id) return;
+    if (msg.type === 'find') {
+      socket.send(message('here'), rinfo.port, rinfo.address, ignore); // 휴대폰 앱에게 이 PC의 주소를 알려 준다
+      return;
+    }
     // 새로 켜진 PC가 인사하면 바로 답해서, 서로 30초를 기다리지 않고 찾게 한다
     if (msg.type === 'hello') socket.send(message('here'), rinfo.port, rinfo.address, ignore);
     onPeer({ id: msg.id, name: msg.name, port: msg.port, address: rinfo.address });

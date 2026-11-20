@@ -47,6 +47,7 @@ const STATIC_TYPES = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.webmanifest': 'application/manifest+json',
+  '.apk': 'application/vnd.android.package-archive', // 휴대폰에 내려주는 쏙 안드로이드 앱
 };
 
 export const newId = () => crypto.randomBytes(8).toString('hex');
@@ -276,7 +277,7 @@ export function createApp(options) {
   }
 
   function session(ctx) {
-    const info = { app: APP_ID, version: VERSION, isHost: ctx.isHost, device: ctx.device };
+    const info = { app: APP_ID, version: VERSION, isHost: ctx.isHost, device: ctx.device, androidApp: staticFiles.has(`${APP_ID}.apk`) };
     if (!ctx.isHost) return info;
     const port = server.address().port;
     const addresses = lanAddresses().map(({ address, iface }) => {
@@ -572,6 +573,7 @@ export function createApp(options) {
     if (!file) return sendText(res, 404, 'Not Found');
 
     const headers = { 'Content-Type': file.type, 'Cache-Control': 'no-cache' };
+    if (name.endsWith('.apk')) headers['Content-Disposition'] = `attachment; filename="${name}"`;
     if (name === 'index.html') {
       headers['Content-Security-Policy'] = PAGE_CSP;
       headers['X-Frame-Options'] = 'DENY';

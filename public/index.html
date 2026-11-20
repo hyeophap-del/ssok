@@ -120,6 +120,21 @@
           <div id="transfer-detail" class="muted small"></div>
         </section>
 
+        <section id="app-card" class="card tip remote-only" hidden>
+          <div>
+            <strong>{{APP_NAME}} 앱으로 더 편하게</strong>
+            <p class="muted small">앱을 설치하면 갤러리에서 <b>공유 → {{APP_NAME}}</b> 한 번으로 PC에 보낼 수 있어요. 화면이 꺼져도 끝까지 보내고, 앱과 PC 사이는 암호화돼요.</p>
+            <div class="app-actions">
+              <a class="btn small" href="/{{APP_ID}}.apk" download>① 앱 설치 파일 받기</a>
+              <a id="app-pair" class="btn small primary" href="#">② 앱에 이 PC 연결</a>
+            </div>
+            <p class="muted small">설치할 때 ‘출처를 알 수 없는 앱 설치’ 허용을 한 번 켜야 해요.</p>
+          </div>
+          <button id="app-card-close" class="icon-btn" type="button" aria-label="닫기">
+            <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+          </button>
+        </section>
+
         <section id="install-tip" class="card tip remote-only" hidden>
           <div>
             <strong>홈 화면에 추가해 두세요</strong>

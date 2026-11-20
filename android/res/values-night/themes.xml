@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#7B98FF</item>
+        <item name="android:colorPrimary">#7B98FF</item>
+        <item name="android:statusBarColor">#101217</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">#101217</item>
+        <item name="android:windowBackground">@color/background</item>
+    </style>
+    <style name="AppTheme.Translucent" parent="@android:style/Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorAccent">#7B98FF</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+    <color name="background">#101217</color>
+    <color name="surface">#191C23</color>
+    <color name="text">#E9EBF0</color>
+    <color name="muted">#9298A6</color>
+    <color name="accent">#7B98FF</color>
+    <color name="accent_soft">#232C4A</color>
+    <color name="border">#2B303A</color>
+</resources>

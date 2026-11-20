@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
-    "package": "node scripts/package.mjs"
+    "package": "node scripts/package.mjs",
+    "android": "node android/build.mjs"
   },
   "engines": {
     "node": ">=20"

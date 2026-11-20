@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 위·아래 화살표 (public/icon.svg와 같은 좌표). 적응형 아이콘의 안전 영역에 들어가도록 가운데 60%로 줄인다 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group
+        android:pivotX="256"
+        android:pivotY="256"
+        android:scaleX="0.6"
+        android:scaleY="0.6">
+        <path
+            android:pathData="M196,368 L196,144 M132,208 L196,144 L260,208 M316,144 L316,368 M252,304 L316,368 L380,304"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="40"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>
