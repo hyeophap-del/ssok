@@ -61,7 +61,9 @@ const describe = (from, name) => {
 const exe = describe(path.join(ROOT, 'dist', `${APP_NAME}.exe`), `Ssok-${version}.exe`);
 const apk = fs.existsSync(path.join(ROOT, 'public', 'ssok.apk')) ? describe(path.join(ROOT, 'public', 'ssok.apk'), `ssok-${version}.apk`) : null;
 
-const manifest = JSON.stringify({ version, date: new Date().toLocaleDateString('sv-SE'), notes, exe, ...(apk ? { apk } : {}) }, null, 2);
+// PC 화면에는 글자 그대로 보이므로 마크다운 굵게 표시(**)는 뺀다 (GitHub 설명에는 그대로 둔다)
+const plainNotes = notes.split('**').join('');
+const manifest = JSON.stringify({ version, date: new Date().toLocaleDateString('sv-SE'), notes: plainNotes, exe, ...(apk ? { apk } : {}) }, null, 2);
 fs.writeFileSync(path.join(OUT, 'latest.json'), manifest);
 fs.writeFileSync(path.join(OUT, 'latest.json.sig'), crypto.sign(null, Buffer.from(manifest), privateKey).toString('base64'));
 fs.writeFileSync(
