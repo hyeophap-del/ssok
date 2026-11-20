@@ -1,0 +1,16 @@
+{
+  "name": "Galaxy File",
+  "short_name": "Galaxy File",
+  "description": "PC와 휴대폰 사이 무선 파일 공유",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f8",
+  "theme_color": "#3b62f0",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

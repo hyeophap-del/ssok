@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <title>Galaxy File</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icon.svg" alt="" width="30" height="30">
+        <span>Galaxy File</span>
+      </div>
+      <div id="status" class="status" data-state="connecting" role="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="status-text">연결 중…</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="side host-only">
+        <section id="net-warning" class="card warning" role="alert" hidden>
+          <strong>휴대폰이 접속하지 못할 수 있어요</strong>
+          <p id="net-warning-text" class="small"></p>
+        </section>
+
+        <section class="card qr-card">
+          <h2>휴대폰 연결</h2>
+          <p class="muted">휴대폰 카메라로 QR 코드를 스캔하면 바로 열려요.</p>
+          <div id="qr" class="qr" aria-label="휴대폰 접속용 QR 코드"></div>
+          <code id="addr-url" class="addr-url"></code>
+          <label id="addr-picker" class="addr-picker" hidden>
+            <span>네트워크</span>
+            <select id="addr-select"></select>
+          </label>
+        </section>
+
+        <section class="card">
+          <h2>받은 파일 폴더</h2>
+          <p id="received-dir" class="path"></p>
+          <button id="open-folder" class="btn" type="button">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>폴더 열기
+          </button>
+        </section>
+
+        <details class="card help">
+          <summary>휴대폰에서 접속이 안 되나요?</summary>
+          <ol>
+            <li><b>같은 Wi-Fi</b>에 연결되어 있는지 확인하세요. 게스트 Wi-Fi는 기기끼리 통신이 막혀 있을 수 있어요.</li>
+            <li>처음 실행할 때 뜬 <b>Windows 방화벽 창에서 ‘허용’</b>을 눌러야 해요. 놓쳤다면 <i>Windows 보안 → 방화벽 및 네트워크 보호 → 방화벽에서 앱 허용</i>에서 Node.js를 체크하세요.</li>
+            <li>Wi-Fi가 <b>‘공용 네트워크’</b>면 막힐 수 있어요. <i>설정 → 네트워크 및 인터넷 → Wi-Fi → 연결된 Wi-Fi</i>에서 <b>‘개인 네트워크’</b>로 바꾸세요.</li>
+            <li>네트워크가 여러 개라면 위에서 다른 네트워크를 골라 다시 스캔해 보세요.</li>
+          </ol>
+        </details>
+      </aside>
+
+      <div class="main">
+        <section class="card composer">
+          <div class="pick-buttons remote-only">
+            <label class="big-btn primary">
+              <input id="pick-media" type="file" accept="image/*,video/*" multiple hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-image"/></svg>
+              <span>사진·동영상<br>보내기</span>
+            </label>
+            <label class="big-btn">
+              <input id="pick-file" type="file" multiple hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>
+              <span>파일<br>보내기</span>
+            </label>
+          </div>
+
+          <div class="targets host-only">
+            <span class="targets-label">보낼 곳</span>
+            <div id="targets" class="chips" role="group" aria-label="보낼 곳"></div>
+          </div>
+
+          <label id="dropzone" class="dropzone host-only">
+            <input id="pick-host" type="file" multiple hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>
+            <strong id="dropzone-title">휴대폰으로 보낼 파일을 여기에 끌어다 놓으세요</strong>
+            <span id="dropzone-hint" class="muted">클릭해서 고르거나, 캡처한 화면을 Ctrl+V로 붙여 넣어도 돼요</span>
+          </label>
+
+          <form id="text-form" class="text-form">
+            <textarea id="text-input" rows="1" enterkeyhint="send" aria-label="보낼 텍스트"></textarea>
+            <button class="btn primary" type="submit">보내기</button>
+          </form>
+        </section>
+
+        <section id="transfer" class="card transfer" hidden>
+          <div class="transfer-head">
+            <strong id="transfer-title"></strong>
+            <button id="transfer-cancel" class="btn ghost small" type="button">취소</button>
+          </div>
+          <div class="bar"><div id="transfer-bar"></div></div>
+          <div id="transfer-detail" class="muted small"></div>
+        </section>
+
+        <section id="install-tip" class="card tip remote-only" hidden>
+          <div>
+            <strong>홈 화면에 추가해 두세요</strong>
+            <p class="muted small">브라우저 메뉴(⋮)에서 <b>‘홈 화면에 추가’</b>를 누르면 다음부터 앱처럼 바로 열려요.</p>
+          </div>
+          <button id="install-tip-close" class="icon-btn" type="button" aria-label="닫기">
+            <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+          </button>
+        </section>
+
+        <section class="timeline">
+          <h2>주고받은 항목</h2>
+          <ul id="items" class="items"></ul>
+          <div id="empty" class="empty" hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-swap"/></svg>
+            <p>아직 주고받은 항목이 없어요.</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="locked" class="locked" hidden>
+    <div class="locked-card">
+      <img src="/icon.svg" alt="" width="64" height="64">
+      <h1>PC 화면의 QR 코드를 스캔하세요</h1>
+      <p>PC에서 Galaxy File을 실행하면 화면에 QR 코드가 나타나요.<br>휴대폰 카메라로 스캔하면 바로 연결돼요.</p>
+      <p class="muted small">이미 스캔했는데 이 화면이 보인다면 접속 코드가 바뀌었을 수 있어요. 다시 스캔해 주세요.</p>
+    </div>
+  </div>
+
+  <dialog id="peers-dialog" class="dialog" aria-labelledby="peers-title">
+    <div class="dialog-head">
+      <h2 id="peers-title">다른 PC와 연결</h2>
+      <button class="icon-btn" type="button" data-close aria-label="닫기"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <p class="muted small">다른 PC에서도 Galaxy File을 실행하면 아래에 나타나요. 처음 한 번만 연결해 두면 다음부터는 바로 보낼 수 있어요.</p>
+
+    <div id="pairing" class="pairing" hidden>
+      <div id="pairing-code" class="code" aria-label="확인 숫자"></div>
+      <p id="pairing-text"></p>
+      <button id="pairing-close" class="btn small" type="button" hidden>확인</button>
+    </div>
+
+    <section class="peer-section">
+      <h3>주변 PC</h3>
+      <ul id="nearby" class="peer-list"></ul>
+      <p id="nearby-empty" class="muted small searching">찾는 중… 같은 공유기(Wi-Fi·유선)에 연결된 PC만 보여요.</p>
+    </section>
+
+    <section id="paired-section" class="peer-section" hidden>
+      <h3>연결된 PC</h3>
+      <ul id="paired" class="peer-list"></ul>
+    </section>
+
+    <form id="connect-form" class="connect-form">
+      <label for="connect-address">목록에 안 보이면 상대 PC의 주소로 연결하세요</label>
+      <div class="connect-row">
+        <input id="connect-address" type="text" placeholder="예: 192.168.0.40" autocomplete="off" spellcheck="false" required>
+        <button class="btn" type="submit">연결</button>
+      </div>
+      <p class="muted small">이 PC는 <b id="self-name"></b> · 주소 <code id="self-address" class="inline-code"></code></p>
+    </form>
+  </dialog>
+
+  <dialog id="request-dialog" class="dialog narrow" aria-labelledby="request-title">
+    <h2 id="request-title">연결 요청</h2>
+    <p><b id="request-name"></b><span id="request-address" class="muted"></span>에서 이 PC와 연결하려고 해요.</p>
+    <div id="request-code" class="code" aria-label="확인 숫자"></div>
+    <p class="muted small">요청한 PC 화면에 <b>같은 숫자</b>가 보일 때만 허용하세요. 허용하면 두 PC가 서로 파일과 텍스트를 보낼 수 있어요.</p>
+    <div class="dialog-actions">
+      <button id="request-deny" class="btn" type="button">거절</button>
+      <button id="request-accept" class="btn primary" type="button">허용</button>
+    </div>
+  </dialog>
+
+  <div id="drop-overlay" class="drop-overlay" hidden>
+    <div><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>놓으면 보내요</div>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></symbol>
+      <symbol id="i-video" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3z"/></symbol>
+      <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+      <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/></symbol>
+      <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m0 0-5 5m5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12m0 0-5-5m5 5 5-5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
+      <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18h2"/></symbol>
+      <symbol id="i-pc" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 20V5m0 0L3 9m4-4 4 4M17 4v15m0 0 4-4m-4 4-4-4"/></symbol>
+    </defs>
+  </svg>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
