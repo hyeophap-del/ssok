@@ -15,6 +15,8 @@ let server;
 let base;
 let tmp;
 let release; // { version, files: { name: Buffer } }
+let staleSignatureFrom = null; // '최신' 주소가 서명 파일만 예전 릴리스를 가리키는 상황 흉내
+const older = {}; // 버전별 예전 릴리스
 
 function publish(version, exe, { signWith = keys.privateKey, tamperExe = false } = {}) {
   const name = `Ssok-${version}.exe`;
@@ -43,12 +45,16 @@ before(async () => {
       return res.end();
     }
     if ((m = /^\/releases\/latest\/download\/(.+)$/.exec(req.url))) {
-      res.writeHead(302, { Location: `/releases/download/v${release.version}/${m[1]}` });
+      const version = m[1] === 'latest.json.sig' && staleSignatureFrom ? staleSignatureFrom : release.version;
+      res.writeHead(302, { Location: `/releases/download/v${version}/${m[1]}` });
       return res.end();
     }
-    if ((m = /^\/releases\/download\/v([\d.]+)\/(.+)$/.exec(req.url)) && m[1] === release.version && release.files[m[2]]) {
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
-      return res.end(release.files[m[2]]);
+    if ((m = /^\/releases\/download\/v([\d.]+)\/(.+)$/.exec(req.url))) {
+      const files = m[1] === release.version ? release.files : older[m[1]]?.files;
+      if (files?.[m[2]]) {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        return res.end(files[m[2]]);
+      }
     }
     res.writeHead(404);
     res.end();
@@ -105,6 +111,20 @@ test('새 exe를 내려받고, 올린 파일과 똑같은지 확인한다', asyn
   const file = await u.download();
   assert.equal(path.basename(file), 'Ssok-1.3.0.exe');
   assert.deepEqual(fs.readFileSync(file), exe);
+});
+
+test('새 릴리스 직후 GitHub의 최신 주소가 파일마다 다른 릴리스를 가리켜도 서명을 맞게 확인한다', async () => {
+  publish('1.5.0', Buffer.from('OLD'));
+  older['1.5.0'] = release;
+  publish('1.6.0', Buffer.from('NEW'));
+  staleSignatureFrom = '1.5.0'; // 서명 파일의 '최신' 주소만 아직 예전 릴리스를 가리킨다
+  try {
+    const state = await updater('1.5.0').check();
+    assert.equal(state.error, null);
+    assert.equal(state.available.version, '1.6.0');
+  } finally {
+    staleSignatureFrom = null;
+  }
 });
 
 test('중간에 바꿔치기된 exe는 지우고 설치하지 않는다', async () => {

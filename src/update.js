@@ -72,10 +72,17 @@ export function createUpdater({ currentVersion, releasesUrl, publicKey, download
     state.error = null;
     changed();
     try {
-      const [text, signature] = await Promise.all([
-        getText(`${releasesUrl}/latest/download/latest.json`),
-        getText(`${releasesUrl}/latest/download/latest.json.sig`),
-      ]);
+      const text = await getText(`${releasesUrl}/latest/download/latest.json`);
+      // 서명은 그 버전의 릴리스에서 받는다. 새 릴리스를 올린 직후 GitHub의 '최신' 주소는
+      // 파일마다 잠깐 서로 다른 릴리스를 가리킬 수 있어서, 둘 다 '최신'에서 받으면 짝이 어긋난다.
+      let claimed;
+      try {
+        claimed = JSON.parse(text).version;
+      } catch {
+        claimed = null;
+      }
+      if (!VERSION.test(claimed || '')) throw new Error('업데이트 정보가 올바르지 않아요.');
+      const signature = await getText(`${releasesUrl}/download/v${claimed}/latest.json.sig`);
       const found = readManifest(text, signature, publicKey);
       manifest = compareVersions(found.version, currentVersion) > 0 ? found : null;
       state.available = manifest && { version: manifest.version, notes: manifest.notes, size: manifest.exe.size };
