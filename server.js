@@ -10,7 +10,7 @@ import { createApp, newToken, isPartialUpload, VERSION } from './src/app.js';
 import { Store } from './src/store.js';
 import { lanAddresses, broadcastAddresses } from './src/net.js';
 import { PeerBook, newPeerId, cleanName, pingApp } from './src/peers.js';
-import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME } from './src/brand.js';
+import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME, REPO } from './src/brand.js';
 import { startDiscovery } from './src/discovery.js';
 import { loadIdentity } from './src/tls.js';
 import { encodeQR, toTerminal } from './src/qr.js';
@@ -26,6 +26,8 @@ import {
 import { spawn } from 'node:child_process';
 import { isExe, extractAssets, installedExePath, samePath, copyWithRetry } from './src/exe.js';
 import { requestJson } from './src/peers.js';
+import { createUpdater } from './src/update.js';
+import { UPDATE_PUBLIC_KEY } from './src/update-key.js';
 
 // exe로 배포했을 때는 코드와 화면 파일이 exe 안에 있다 (화면 파일은 처음 실행할 때 풀어 둔다)
 const EXE = isExe();
@@ -359,6 +361,35 @@ async function main() {
   if (!localOnly) setInterval(checkNetworks, 60_000).unref(); // 설정을 바꾸면 1분 안에 경고가 사라진다
 
   const self = { id: config.id, name: pcName }; // 이름은 PC 화면에서 바꿀 수 있다
+
+  // 새 버전 확인 (exe로 설치했을 때만. 시험할 때는 SSOK_UPDATE_URL로 다른 곳을 가리킬 수 있다)
+  const releasesUrl = process.env.SSOK_UPDATE_URL ?? (EXE ? `https://github.com/${REPO}/releases` : null);
+  const updateCore = releasesUrl
+    ? createUpdater({
+        currentVersion: VERSION,
+        releasesUrl,
+        publicKey: UPDATE_PUBLIC_KEY,
+        downloadDir: path.join(home, 'update'),
+        onChange: (state) => app?.broadcastHost('update', state),
+      })
+    : null;
+  try {
+    updateCore?.cleanup(); // 지난번 업데이트 때 받아 둔 파일
+  } catch {
+    // 아직 그 파일이 실행 중이면 다음에 지운다
+  }
+  const updater = updateCore && {
+    state: updateCore.state,
+    check: updateCore.check,
+    apply: async () => {
+      const file = await updateCore.download();
+      app.broadcastHost('update', { ...updateCore.state(), restarting: true });
+      // 새 exe는 실행되면 이 프로세스를 끄고 자기 자신을 설치한 뒤 다시 켠다 (launch 참고)
+      const keep = ['port', 'host'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, args[k]] : [])); // 실행 옵션은 그대로
+      spawn(file, ['--launch', '--no-open', ...keep], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
+    },
+  };
+
   const app = createApp({
     token: config.token,
     receivedDir,
@@ -374,8 +405,14 @@ async function main() {
       get: () => ({
         name: pcName,
         autostart: shortcutsSupported() ? fs.existsSync(startupShortcut(APP_NAME)) : null,
+        autoUpdate: updater ? config.autoUpdate !== false : null,
+        version: VERSION,
       }),
-      set: async ({ name, autostart }) => {
+      set: async ({ name, autostart, autoUpdate }) => {
+        if (autoUpdate !== undefined && updater) {
+          config.autoUpdate = Boolean(autoUpdate);
+          if (autoUpdate) updater.check();
+        }
         if (name !== undefined) {
           const clean = cleanName(name);
           if (!clean) throw Object.assign(new Error('이름을 입력해 주세요.'), { status: 400 });
@@ -391,6 +428,7 @@ async function main() {
       },
     },
     onQuit: () => shutdown(),
+    updater,
     peerBook,
     announce: () => discovery?.announce(),
     showHostPage: () => {
@@ -476,6 +514,13 @@ async function main() {
       console.log(`  ⚠ 다른 PC 자동 찾기를 시작하지 못했어요 (${err.code || err.message}). 주소로 직접 연결은 할 수 있어요.`);
     }
   }
+  // 새 버전은 켜고 잠시 뒤, 그리고 하루에 한 번 확인한다 (설정에서 끌 수 있다)
+  if (updater) {
+    const checkUpdate = () => config.autoUpdate !== false && updater.check();
+    setTimeout(checkUpdate, 20_000).unref();
+    setInterval(checkUpdate, 24 * 60 * 60 * 1000).unref();
+  }
+
   app.peers.refresh();
   setInterval(() => app.peers.refresh(), 30_000).unref();
 

@@ -212,6 +212,7 @@ function connectEvents() {
     hideRequest();
   });
   events.addEventListener('pair-result', (e) => onPairResult(JSON.parse(e.data)));
+  events.addEventListener('update', (e) => renderUpdate(JSON.parse(e.data)));
   events.addEventListener('add', (e) => {
     const item = JSON.parse(e.data);
     if (state.items.some((i) => i.id === item.id)) return;
@@ -754,6 +755,32 @@ function setupSettings() {
     }
   }
 
+  if (settings?.autoUpdate !== null && settings?.autoUpdate !== undefined) {
+    $('update-row').hidden = false;
+    $('autoupdate').checked = settings.autoUpdate;
+    $('version-text').textContent = `지금 버전 ${settings.version}`;
+    $('autoupdate').addEventListener('change', async (e) => {
+      try {
+        await saveSettings({ autoUpdate: e.target.checked });
+      } catch (err) {
+        e.target.checked = !e.target.checked;
+        showError(err);
+      }
+    });
+    $('update-check').addEventListener('click', async () => {
+      try {
+        const result = await post('/api/update/check');
+        renderUpdate(result);
+        if (!result.available && !result.error) toast('지금 버전이 최신이에요.');
+        if (result.error) toast(result.error, 'error');
+      } catch (err) {
+        showError(err);
+      }
+    });
+  }
+  if (state.session.update) renderUpdate(state.session.update);
+  $('update-apply').addEventListener('click', applyUpdate);
+
   if (canQuit) {
     $('quit').hidden = false;
     $('quit').addEventListener('click', async () => {
@@ -767,6 +794,72 @@ function setupSettings() {
       }
     });
   }
+}
+
+// ---- 업데이트 (PC 화면 전용) ----
+
+let restartingTo = null;
+
+function renderUpdate(update) {
+  const card = $('update-card');
+  if (!update || (!update.available && !update.progress && !update.restarting)) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const { available, progress } = update;
+  if (update.restarting) {
+    $('update-title').textContent = `${available?.version ?? '새'} 버전으로 다시 켜는 중…`;
+    $('update-notes').textContent = '잠시 뒤 이 화면이 저절로 새로 고쳐져요.';
+    $('update-progress').hidden = true;
+    $('update-apply').hidden = true;
+    waitForRestart(available?.version);
+    return;
+  }
+  if (progress) {
+    const percent = Math.floor((progress.received / progress.size) * 100);
+    $('update-title').textContent = `${progress.version} 버전 내려받는 중… ${percent}%`;
+    $('update-progress').hidden = false;
+    $('update-bar').style.width = `${percent}%`;
+    $('update-apply').hidden = true;
+    return;
+  }
+  $('update-title').textContent = `새 버전 ${available.version}이(가) 있어요`;
+  $('update-notes').textContent = available.notes || '';
+  $('update-progress').hidden = true;
+  $('update-apply').hidden = false;
+  $('update-apply').disabled = false;
+}
+
+async function applyUpdate() {
+  $('update-apply').disabled = true;
+  try {
+    renderUpdate(await post('/api/update/apply'));
+  } catch (err) {
+    $('update-apply').disabled = false;
+    showError(err);
+  }
+}
+
+/** 새 버전이 뜰 때까지 기다렸다가 화면을 새로 고친다 */
+async function waitForRestart(version) {
+  if (restartingTo) return;
+  restartingTo = version || 'any';
+  for (let i = 0; i < 120; i++) {
+    await sleep(1000);
+    try {
+      const res = await fetch('/api/ping', { cache: 'no-store' });
+      const info = await res.json();
+      if (info.version !== state.session.version && (!version || info.version === version)) {
+        location.reload();
+        return;
+      }
+    } catch {
+      // 바뀌는 동안에는 잠깐 꺼져 있다
+    }
+  }
+  restartingTo = null;
+  toast(`업데이트가 끝나지 않은 것 같아요. 시작 메뉴에서 ${APP_NAME}을(를) 다시 실행해 주세요.`, 'error');
 }
 
 const saveSettings = (patch) =>

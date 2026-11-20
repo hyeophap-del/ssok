@@ -9,11 +9,14 @@
 - 텍스트·링크: 어느 쪽에서 보내든 상대 화면에 바로 뜨고, 버튼 하나로 복사할 수 있습니다.
 - 실시간: 보내는 즉시 상대 화면에 나타나고 알림이 뜹니다. 전송 속도와 남은 시간도 보여 줍니다.
 
+**[⬇ 최신 버전 내려받기 (Windows)](https://github.com/hyeophap-del/ssok/releases/latest)** — `Ssok-<버전>.exe` 하나만 받으면 됩니다.
+
 ## 설치와 실행
 
-**나눠 받은 `쏙.exe`로 설치할 때** (Node.js 설치 필요 없음)
+**exe로 설치할 때** (Node.js 설치 필요 없음)
 
-1. **`쏙.exe`를 더블클릭**합니다. 프로그램이 `%LOCALAPPDATA%\Programs\Ssok`에 스스로 설치되므로, 받은 exe는 지워도 됩니다.
+1. [릴리스 페이지](https://github.com/hyeophap-del/ssok/releases/latest)에서 받은 **`Ssok-<버전>.exe`를 더블클릭**합니다.
+   프로그램이 `%LOCALAPPDATA%\Programs\Ssok`에 스스로 설치되므로, 받은 exe는 지워도 됩니다.
    - "Windows의 PC 보호" 창이 뜨면 **[추가 정보] → [실행]** 을 누르세요 (코드 서명이 없어서 뜨는 경고입니다).
    - **Windows 방화벽 창에 ‘쏙’이 뜨면 ‘허용’** 을 누르세요. 그래야 휴대폰과 다른 PC가 접속할 수 있습니다.
 2. 브라우저에 PC 화면이 열립니다. **휴대폰 카메라로 QR 코드를 스캔**하세요.
@@ -21,7 +24,10 @@
 
 처음 실행하면 **시작 메뉴에 ‘쏙’** 이 생기고, **PC를 켤 때 창 없이 자동으로 실행**됩니다. 휴대폰에서 보내려면 PC에서 쏙이 켜져 있어야 하기 때문입니다.
 화면을 다시 열려면 시작 메뉴에서 ‘쏙’을 누르세요. 자동 실행 끄기와 프로그램 끄기는 PC 화면의 **[설정]** 에 있습니다.
-**새 버전**의 `쏙.exe`를 받아 실행하면 돌고 있던 예전 버전을 끄고 바꿔 줍니다. 설정과 연결은 그대로 남습니다.
+**업데이트**: 새 버전이 나오면 PC 화면 맨 위에 **“새 버전이 있어요 [업데이트]”** 가 뜹니다 (하루에 한 번 확인, [설정]에서 끌 수 있음).
+누르면 내려받아 스스로 바꾸고 화면이 새로 고쳐집니다. 설정과 연결은 그대로 남습니다.
+받은 파일은 우리 업데이트 서명 키로 서명했는지, 올린 파일과 똑같은지(SHA-256)를 확인한 뒤에만 설치합니다.
+새 버전의 exe를 직접 받아 실행해도 똑같이 바뀝니다. 휴대폰 앱은 PC가 업데이트되면 앱 화면에 “새 버전 앱이 있어요”가 뜹니다.
 
 **이 저장소에서 바로 실행할 때** (Node.js 20 이상 필요): `start.bat`을 더블클릭하면 위와 똑같이 동작합니다.
 실행 기록을 창에서 보고 싶으면 `npm start`(= `node server.js`)로 실행하세요.
@@ -111,6 +117,10 @@ node server.js [옵션]        (start.bat 뒤에 붙여도 됩니다)
   한쪽에서 연결을 해제하면 양쪽 모두에서 키가 지워집니다.
 - 휴대폰 **브라우저**와는 암호화되지 않은 HTTP로 주고받습니다 (공유기 안에서는 브라우저가 믿는 인증서를 받을 수 없어서).
   집 Wi-Fi나 휴대폰 핫스팟에서 쓰세요.
+- 자동 업데이트는 GitHub 릴리스의 `latest.json`을 읽고, 프로그램에 넣어 둔 **공개 키로 서명을 확인**한 뒤 exe의 SHA-256까지 맞을 때만 설치합니다.
+  GitHub 계정이 털려도 서명 키 없이는 가짜 업데이트를 퍼뜨릴 수 없습니다.
+
+보안 문제를 발견하면 공개 이슈 대신 GitHub의 [비공개 취약점 신고](https://github.com/hyeophap-del/ssok/security/advisories/new)로 알려 주세요.
 
 ## 파일 위치
 
@@ -138,7 +148,14 @@ npm test
 npm run exe       # 나눠 줄 exe 만들기 (esbuild·resedit는 개발할 때만 씀)
 npm run package   # 나눠 줄 압축 파일 만들기
 npm run android   # 안드로이드 앱 빌드 → public/ssok.apk
+npm run release -- --notes-file 바뀐점.md   # 새 버전 올릴 준비 (테스트·앱·exe·서명한 latest.json)
 ```
+
+**새 버전 내기**: `package.json`의 `version`을 올리고 `npm run release -- --notes-file …`을 실행하면
+`dist\release\v<버전>\`에 올릴 파일이 생기고, 마지막에 GitHub에 올리는 `gh release create …` 명령을 보여 줍니다.
+설치된 쏙들은 이 릴리스의 `latest.json`을 보고 업데이트합니다.
+**업데이트 서명 키**는 `%USERPROFILE%\.ssok-release\update-key.pem`에 있습니다 (공개 키는 `src/update-key.js`).
+저장소에 넣지 말고 꼭 따로 백업하세요. 잃어버리면 이미 설치된 쏙들에 자동 업데이트를 보낼 수 없습니다.
 
 안드로이드 앱은 Gradle 없이 SDK 도구로 바로 빌드합니다. 필요한 것(관리자 권한 없이 사용자 폴더에 설치):
 JDK 17 이상(`JAVA_HOME` 또는 `%LOCALAPPDATA%\Programs\jdk-*`),
@@ -165,4 +182,10 @@ Android SDK의 `platforms;android-35`, `build-tools;35.0.0`(`ANDROID_HOME` 또�
 | `scripts/make-icons.mjs` | `icon.svg`와 같은 모양의 PNG·ICO 아이콘 생성 |
 | `scripts/package.mjs` | 나눠 줄 압축 파일 만들기 |
 | `scripts/build-exe.mjs`, `src/exe.js` | 나눠 줄 exe 만들기 (Node.js 단일 실행 파일), exe의 스스로 설치·화면 파일 풀기 |
+| `src/update.js`, `src/update-key.js` | 새 버전 확인·내려받기·서명 확인, 업데이트 공개 키 |
+| `scripts/release.mjs` | 새 버전 올릴 준비 (exe·apk·서명한 latest.json) |
 | `android/` | 안드로이드 앱: 공유 받기(`ShareActivity`), 보내기 서비스(`UploadService`), PC 연결(`PairActivity`), 암호화 통신(`Net`) |
+
+## 라이선스
+
+[MIT](LICENSE). 배포하는 exe에는 [Node.js](https://github.com/nodejs/node/blob/main/LICENSE)(MIT)가 함께 들어 있습니다.

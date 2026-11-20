@@ -9,3 +9,5 @@ export const APP_ID = 'ssok';
 export const APP_DIR = 'Ssok';
 /** 받은 파일을 저장할 기본 폴더 이름 (다운로드 폴더 아래) */
 export const RECEIVED_DIR_NAME = '쏙';
+/** 새 버전을 올리는 GitHub 저장소 (릴리스 페이지에서 업데이트를 받는다) */
+export const REPO = 'hyeophap-del/ssok';

@@ -14,7 +14,11 @@ import { createPeerApi } from './peer-api.js';
 import { createDualServer } from './tls.js';
 import { APP_NAME, APP_ID } from './brand.js';
 
-export const VERSION = '1.0.0';
+import pkg from '../package.json' with { type: 'json' };
+
+export const VERSION = pkg.version;
+/** 안드로이드 앱 버전 번호 (android/build.mjs와 같은 계산: 1.2.3 → 10203) */
+const ANDROID_VERSION_CODE = (([a, b, c]) => a * 10000 + b * 100 + c)(VERSION.split('.').map(Number));
 const COOKIE = APP_ID;
 const LEGACY_COOKIE = 'gf'; // 예전 이름(Galaxy File) 때 휴대폰에 저장된 쿠키도 받아 준다
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60; // 브라우저가 허용하는 최대치(400일)
@@ -164,6 +168,7 @@ export function createApp(options) {
     peerOptions = {},
     settings = null,
     onQuit = null,
+    updater = null, // { state(), check(), apply() } — exe로 설치했을 때만
     log = () => {},
   } = options;
 
@@ -250,7 +255,16 @@ export function createApp(options) {
     if (pathname === '/api/ping') {
       rejectBody(req, res);
       // 이 PC에서 물어보면 실행 파일 위치도 알려 준다 (새 버전 exe가 예전 것을 바꿀 때 쓴다)
-      return sendJson(res, 200, { app: APP_ID, version: VERSION, id: self.id, name: self.name, ...(ctx.isHost ? { exe: process.execPath } : {}) });
+      return sendJson(res, 200, {
+        app: APP_ID,
+        version: VERSION,
+        id: self.id,
+        name: self.name,
+        // 휴대폰 앱이 새 버전이 있는지 알 수 있게 이 PC가 가진 앱 버전을 알려 준다
+        ...(staticFiles.has(`${APP_ID}.apk`) ? { android: ANDROID_VERSION_CODE } : {}),
+        // 이 PC에서 물어보면 실행 파일 위치도 알려 준다 (새 버전 exe가 예전 것을 바꿀 때 쓴다)
+        ...(ctx.isHost ? { exe: process.execPath } : {}),
+      });
     }
     if (peers && (await peers.handlePublic(req, res, url))) return;
     if (!ctx.authed) {
@@ -273,6 +287,7 @@ export function createApp(options) {
     if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
     if (pathname === '/api/settings' && (method === 'GET' || method === 'POST')) return settingsApi(req, res, ctx);
+    if (pathname.startsWith('/api/update')) return updateApi(req, res, url, ctx);
     if (pathname === '/api/quit' && method === 'POST') {
       rejectBody(req, res);
       if (!ctx.isHost || !onQuit) return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
@@ -322,9 +337,26 @@ export function createApp(options) {
       name: self.name,
       peerSupport: Boolean(peers),
       settings: settings?.get() ?? null,
+      update: updater?.state() ?? null,
       canQuit: Boolean(onQuit),
       warnings: warnings(),
     };
+  }
+
+  /** 새 버전 확인·업데이트 (PC 화면에서만) */
+  async function updateApi(req, res, url, ctx) {
+    rejectBody(req, res);
+    if (!ctx.isHost) return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
+    if (!updater) return sendJson(res, 404, { error: '이 설치 방식에서는 자동 업데이트를 쓸 수 없어요.' });
+    if (url.pathname === '/api/update' && req.method === 'GET') return sendJson(res, 200, updater.state());
+    if (url.pathname === '/api/update/check' && req.method === 'POST') return sendJson(res, 200, await updater.check());
+    if (url.pathname === '/api/update/apply' && req.method === 'POST') {
+      if (!updater.state().available) return sendJson(res, 409, { error: '새 버전이 없어요.' });
+      // 내려받는 동안의 진행률은 실시간 알림('update')으로 보낸다
+      updater.apply().catch((err) => log('error', err));
+      return sendJson(res, 202, updater.state());
+    }
+    return sendJson(res, 404, { error: '없는 주소예요.' });
   }
 
   async function settingsApi(req, res, ctx) {
@@ -343,6 +375,7 @@ export function createApp(options) {
         await settings.set({
           name: typeof patch?.name === 'string' ? patch.name : undefined,
           autostart: typeof patch?.autostart === 'boolean' ? patch.autostart : undefined,
+          autoUpdate: typeof patch?.autoUpdate === 'boolean' ? patch.autoUpdate : undefined,
         });
       } catch (err) {
         if (!err.status) log('error', err);
@@ -649,5 +682,5 @@ export function createApp(options) {
     return closed;
   }
 
-  return { server, broadcast, close, clients, peers };
+  return { server, broadcast, broadcastHost, close, clients, peers };
 }

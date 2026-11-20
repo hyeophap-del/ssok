@@ -33,6 +33,50 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         render();
+        checkAppUpdate();
+    }
+
+    /** 연결된 PC가 더 새 버전의 앱을 갖고 있으면 알려 준다 (PC를 업데이트하면 새 앱도 함께 들어온다) */
+    private void checkAppUpdate() {
+        final List<Store.Pc> pcs = Store.pcs(this);
+        if (pcs.isEmpty()) return;
+        final long mine = myVersionCode();
+        new Thread(() -> {
+            for (Store.Pc pc : pcs) {
+                try {
+                    Net.Result ping = Net.json(pc.host, pc.port, "GET", "/api/ping", null, null, pc.fingerprint, 4000);
+                    if (ping.status == 200 && ping.json.optInt("android", 0) > mine) {
+                        runOnUiThread(() -> showAppUpdate(pc));
+                        return;
+                    }
+                } catch (Exception ignored) {
+                    // PC가 꺼져 있다
+                }
+            }
+        }).start();
+    }
+
+    @SuppressWarnings("deprecation")
+    private long myVersionCode() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        } catch (Exception e) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private void showAppUpdate(Store.Pc pc) {
+        LinearLayout card = Ui.card(this);
+        Ui.add(card, Ui.heading(this, "새 버전 앱이 있어요"), 0);
+        Ui.add(card, Ui.muted(this, pc.name + "에서 받을 수 있어요. 받은 파일을 눌러 설치하면 연결은 그대로 남아요."), 4);
+        Ui.add(card, Ui.button(this, "새 버전 받기", true, v -> {
+            Uri apk = Uri.parse("http://" + pc.host + ":" + pc.port + "/" + Net.APP_ID + ".apk");
+            startActivity(new Intent(Intent.ACTION_VIEW, apk));
+        }), 12);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.topMargin = Ui.dp(this, 16);
+        column.addView(card, 2, params);
     }
 
     private void render() {

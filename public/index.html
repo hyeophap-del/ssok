@@ -64,6 +64,13 @@
             <input id="autostart" type="checkbox">
             <span>PC를 켜면 자동으로 실행<br><span class="muted small">꺼져 있으면 휴대폰에서 보내도 받지 못해요</span></span>
           </label>
+          <div id="update-row" class="update-row" hidden>
+            <label class="switch-row">
+              <input id="autoupdate" type="checkbox">
+              <span>새 버전 자동 확인<br><span id="version-text" class="muted small"></span></span>
+            </label>
+            <button id="update-check" class="btn small" type="button">지금 확인</button>
+          </div>
           <button id="quit" class="btn small quit" type="button" hidden>{{APP_NAME}} 끄기</button>
         </section>
 
@@ -79,6 +86,15 @@
       </aside>
 
       <div class="main">
+        <section id="update-card" class="card update-card host-only" hidden>
+          <div class="update-text">
+            <strong id="update-title"></strong>
+            <p id="update-notes" class="muted small"></p>
+            <div id="update-progress" class="bar" hidden><div id="update-bar"></div></div>
+          </div>
+          <button id="update-apply" class="btn primary" type="button">업데이트</button>
+        </section>
+
         <section class="card composer">
           <div class="pick-buttons remote-only">
             <label class="big-btn primary">
