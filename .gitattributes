@@ -1,0 +1,3 @@
+# cmd.exe는 CRLF 줄바꿈이어야 안전하다
+*.bat text eol=crlf
+*.cmd text eol=crlf
