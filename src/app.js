@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import { encodeQR, toSvg } from './qr.js';
 import { sendJson, sendText, sendEmpty, rejectBody, readBody } from './http.js';
 import { safeEqual } from './peers.js';
 import { createPeerApi } from './peer-api.js';
+import { createDualServer } from './tls.js';
 import { APP_NAME, APP_ID } from './brand.js';
 
 export const VERSION = '1.0.0';
@@ -108,7 +110,8 @@ async function freeSpace(dir) {
  * @param {{ open: (p: string) => void, reveal: (p: string) => void }} [options.opener]
  * @param {() => string[]} [options.warnings]  PC 화면에 띄울 안내 (예: 공용 네트워크 경고)
  * @param {{id: string, name: string}} [options.self]  다른 PC에 보일 이 PC의 이름과 고유 번호
- * @param {import('./peers.js').PeerBook} [options.peerBook]  연결된 PC 목록. 없으면 PC끼리 연결 기능을 끈다.
+ * @param {{key: string, cert: string, fingerprint: string}} [options.tls]  이 PC의 인증서. 있으면 같은 포트에서 HTTPS도 받는다.
+ * @param {import('./peers.js').PeerBook} [options.peerBook]  연결된 기기 목록. tls와 함께 있어야 기기끼리 연결 기능이 켜진다.
  * @param {() => void} [options.announce]       주변 PC 다시 찾기
  * @param {() => void} [options.showHostPage]   연결 요청이 왔는데 PC 화면이 닫혀 있을 때 화면 열기
  * @param {{pairTimeoutMs?: number, verifyCooldownMs?: number}} [options.peerOptions]  테스트용 시간 설정
@@ -126,6 +129,7 @@ export function createApp(options) {
     opener = { open() {}, reveal() {} },
     warnings = () => [],
     self = { id: undefined, name: undefined },
+    tls = null,
     peerBook = null,
     announce = () => {},
     showHostPage = () => {},
@@ -135,10 +139,12 @@ export function createApp(options) {
 
   const clients = new Set();
   const selfInfo = () => ({ id: self.id, name: self.name, port: server.address()?.port });
-  const peers = peerBook
+  const peers =
+    peerBook && tls
     ? createPeerApi({
         book: peerBook,
         self: selfInfo,
+        identity: tls,
         broadcastHost,
         hasHostPage: () => [...clients].some((c) => c.isHost),
         showHostPage,
@@ -153,16 +159,22 @@ export function createApp(options) {
     if (type) staticFiles.set(name, { path: path.join(publicDir, name), type });
   }
 
-  const server = http.createServer((req, res) => {
+  const onRequest = (req, res) => {
     handle(req, res).catch((err) => {
       log('error', err);
       if (!res.headersSent) sendJson(res, 500, { error: '서버 오류가 발생했어요.' });
       else res.destroy();
     });
-  });
-  // 큰 동영상 업로드가 몇 분씩 걸려도 끊기지 않게 한다 (Node 기본값은 5분).
-  server.requestTimeout = 0;
-  server.headersTimeout = 60_000;
+  };
+  const httpServer = http.createServer(onRequest);
+  const httpsServer = tls ? https.createServer({ key: tls.key, cert: tls.cert }, onRequest) : null;
+  for (const s of [httpServer, httpsServer].filter(Boolean)) {
+    // 큰 동영상 업로드가 몇 분씩 걸려도 끊기지 않게 한다 (Node 기본값은 5분).
+    s.requestTimeout = 0;
+    s.headersTimeout = 60_000;
+  }
+  // 휴대폰 브라우저는 http://, 다른 PC와 앱은 https://로 같은 포트에 접속한다
+  const server = httpsServer ? createDualServer(httpServer, httpsServer) : httpServer;
 
   async function handle(req, res) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -533,8 +545,12 @@ export function createApp(options) {
     peers?.close();
     for (const client of clients) client.res.end();
     clients.clear();
-    server.closeAllConnections?.();
-    return new Promise((resolve) => server.close(() => resolve()));
+    const closed = new Promise((resolve) => server.close(() => resolve()));
+    for (const s of [httpServer, httpsServer].filter(Boolean)) {
+      s.closeAllConnections();
+      if (s !== server) s.close(() => {}); // 시간 제한 감시를 멈춘다
+    }
+    return closed;
   }
 
   return { server, broadcast, close, clients, peers };

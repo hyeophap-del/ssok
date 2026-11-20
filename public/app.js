@@ -699,7 +699,7 @@ const peerById = (id) => state.peers.find((p) => p.id === id);
 /** 지금 보낼 곳이 연결된 PC면 그 PC, 휴대폰이면 null */
 function currentTarget() {
   const peer = peerById(state.target);
-  return peer?.paired ? peer : null;
+  return peer?.paired && peer.kind === 'pc' ? peer : null;
 }
 
 function setTarget(id) {
@@ -759,7 +759,7 @@ function renderPeers() {
 
 function renderTargets() {
   const peer = currentTarget();
-  const paired = state.peers.filter((p) => p.paired);
+  const paired = state.peers.filter((p) => p.paired && p.kind === 'pc');
   const add = el('button', { type: 'button', class: 'chip add', 'data-add': '' });
   add.append(icon('i-plus'), el('span', {}, paired.length ? 'PC 추가' : '다른 PC'));
   $('targets').replaceChildren(
@@ -818,8 +818,11 @@ function peerRow(peer) {
   const info = el('div', { class: 'peer-info' });
   info.append(el('div', { class: 'peer-name', title: peer.name }, peer.name));
   const sub = el('div', { class: 'peer-sub' });
-  if (peer.paired) sub.append(el('span', { class: peer.online ? 'on' : '' }, peer.online ? '켜져 있음' : '꺼져 있음'), ' · ');
-  sub.append(peer.address);
+  if (peer.kind === 'app') sub.append('휴대폰 앱');
+  else {
+    if (peer.paired) sub.append(el('span', { class: peer.online ? 'on' : '' }, peer.online ? '켜져 있음' : '꺼져 있음'), ' · ');
+    sub.append(peer.address);
+  }
   info.append(sub);
 
   let button;
@@ -829,7 +832,7 @@ function peerRow(peer) {
     const waiting = state.pairing?.id === peer.id && !state.pairing.error;
     button = el('button', { type: 'button', class: 'btn primary', 'data-pair': peer.id, disabled: waiting }, waiting ? '기다리는 중' : '연결');
   }
-  li.append(icon('i-pc'), info, button);
+  li.append(icon(peer.kind === 'app' ? 'i-phone' : 'i-pc'), info, button);
   return li;
 }
 
@@ -839,7 +842,7 @@ function renderPairing() {
   if (!pairing) return;
   $('pairing').classList.toggle('error', Boolean(pairing.error));
   $('pairing-code').hidden = Boolean(pairing.error || !pairing.code);
-  $('pairing-code').textContent = pairing.code || '';
+  $('pairing-code').textContent = formatCode(pairing.code);
   $('pairing-text').textContent = pairing.error || `${pairing.name} 화면에 같은 숫자가 떴는지 확인하고, 그 PC에서 ‘허용’을 눌러 주세요.`;
   $('pairing-close').hidden = !pairing.error;
 }
@@ -919,8 +922,8 @@ async function connectByAddress(e) {
 function showRequest(request) {
   state.request = request;
   $('request-name').textContent = request.name;
-  $('request-address').textContent = ` (${request.address})`;
-  $('request-code').textContent = request.code;
+  $('request-address').textContent = request.kind === 'app' ? ` (휴대폰 앱 · ${request.address})` : ` (${request.address})`;
+  $('request-code').textContent = formatCode(request.code);
   const dialog = $('request-dialog');
   if (!dialog.open) dialog.showModal();
   if (document.hidden) document.title = `연결 요청 · ${APP_NAME}`;
@@ -1072,6 +1075,7 @@ function labeledButton(action, iconId, label, className) {
   return button;
 }
 
+const formatCode = (code = '') => (code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code);
 const fileUrl = (item, inline = false) => `/api/files/${item.id}${inline ? '?inline=1' : ''}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

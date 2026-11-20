@@ -1,35 +1,42 @@
-// PC끼리 연결하고 파일·텍스트를 보내는 API
+// 다른 기기(PC, 휴대폰 앱)와 연결하고, 연결된 PC로 파일·텍스트를 보내는 API.
+// 기기끼리는 항상 HTTPS로 주고받고, 연결할 때 받은 상대 인증서로 고정해서 확인한다.
 //
-// 연결(페어링) 순서
-//   1. A 화면에서 [연결]을 누르면 A 서버가 B 서버에 POST /api/pair 를 보낸다 (A의 키와 확인 숫자 포함).
-//   2. B 화면에 확인 숫자와 함께 연결 요청 창이 뜬다. 사용자가 두 화면의 숫자가 같은지 보고 [허용]을 누른다.
-//   3. B는 A를 저장하고 자기 키를 응답으로 돌려준다. A도 B를 저장한다.
-// 그 뒤로는 서로의 키(Authorization: Bearer)로 상대 PC의 /api/upload, /api/text 를 쓴다.
-// A 화면 → A 서버 → B 서버로 그대로 흘려보내므로 큰 파일도 A의 디스크에 한 번 더 쓰지 않는다.
-import http from 'node:http';
-import crypto from 'node:crypto';
+// 연결(페어링) 순서 — A가 B에 연결을 요청할 때
+//   1. A → B  POST /api/pair/start  { A 정보, A 인증서, A가 B에게 주는 키, 봉인한 난수 H(Na) }
+//             B는 자기 난수 Nb로 답한다. A는 이 연결에서 B의 인증서를 받아 둔다.
+//   2. A → B  POST /api/pair/finish { Na }  (1에서 받은 B 인증서로 고정한 연결)
+//             B는 봉인이 맞는지 확인하고 6자리 확인 숫자를 화면에 띄워 [허용]을 기다린다.
+//             A 화면에도 같은 방식으로 계산한 숫자가 떠 있다. 중간에 누가 끼어들면 숫자가 어긋난다.
+//   3. 허용하면 B는 A를 저장하고 자기 키를 돌려준다. A도 B를 저장한다.
+// 그 뒤로는 서로 받은 키(Authorization: Bearer)로 상대의 /api/upload, /api/text 를 쓴다.
+// 휴대폰 앱도 같은 순서로 연결한다. 앱은 서버가 아니므로 인증서 대신 앱 고유 번호를 신원으로 쓴다.
+import https from 'node:https';
 import { sendJson, sendEmpty, rejectBody, readJson, plainAddress } from './http.js';
 import { APP_NAME, APP_ID } from './brand.js';
+import { fingerprintOf, isValidCert, pinnedTlsOptions } from './tls.js';
 import {
+  NONCE,
   PEER_ID,
   cleanName,
   isValidKey,
   isValidPort,
-  newPairCode,
+  newNonce,
   newPeerKey,
-  pairProof,
+  pairCode,
   parseAddress,
   pingApp,
   requestJson,
-  safeEqual,
+  sha256,
 } from './peers.js';
 
-const NONCE = /^[0-9a-f]{32}$/;
+const COMMIT = /^[0-9a-f]{64}$/;
+const COMMIT_TIMEOUT_MS = 15_000; // 1단계 뒤 2단계가 이 시간 안에 오지 않으면 요청을 버린다
 
 /**
  * @param {object} options
  * @param {import('./peers.js').PeerBook} options.book
  * @param {() => {id: string, name: string, port: number}} options.self
+ * @param {{key: string, cert: string, fingerprint: string}} options.identity  이 PC의 인증서
  * @param {(event: string, data: any) => void} options.broadcastHost   PC 화면에만 보내는 실시간 알림
  * @param {() => boolean} [options.hasHostPage]     PC 화면이 열려 있는지
  * @param {() => void} [options.showHostPage]       연결 요청이 왔는데 PC 화면이 닫혀 있을 때
@@ -41,6 +48,7 @@ const NONCE = /^[0-9a-f]{32}$/;
 export function createPeerApi({
   book,
   self,
+  identity,
   broadcastHost,
   hasHostPage = () => true,
   showHostPage = () => {},
@@ -53,82 +61,119 @@ export function createPeerApi({
   const lastVerify = new Map();
 
   const changed = () => broadcastHost('peers', { peers: book.list() });
-  const publicRequest = (p) => p && { rid: p.rid, id: p.id, name: p.name, address: p.address, code: p.code };
-  const peerHeaders = (peer) => ({
-    Authorization: `Bearer ${peer.sendKey}`,
-    'X-App-Port': String(self().port),
-  });
+  const publicRequest = (p) =>
+    p?.stage === 'asking' ? { rid: p.rid, id: p.id, name: p.name, kind: p.kind, address: p.address, code: p.code } : null;
+  const peerHeaders = (peer) => ({ Authorization: `Bearer ${peer.sendKey}`, 'X-App-Port': String(self().port) });
+  const offlineMessage = (name) => `${name}에 연결하지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.`;
 
   // ---- 인증 ----
 
   /**
-   * Authorization: Bearer 키로 온 요청이면 그 PC를 돌려준다. 키가 틀렸으면 null, 키가 없으면 undefined.
+   * Authorization: Bearer 키로 온 요청이면 그 기기를 돌려준다. 키가 틀렸으면 null, 키가 없으면 undefined.
    */
   function authenticate(req) {
     const key = /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1];
     if (key === undefined) return undefined;
+    // 키는 암호화된 연결로만 받는다. 평문으로 오갔다면 같은 Wi-Fi에서 엿봤을 수 있다.
+    if (!req.socket.encrypted) return null;
     const peer = book.byKey(key);
     if (!peer) return null;
-    // 키를 가진 진짜 그 PC가 보낸 요청이므로 주소가 바뀌었으면 새 주소를 믿어도 된다
-    const address = plainAddress(req.socket.remoteAddress);
-    const port = Number(req.headers['x-app-port']);
-    let moved = book.moveTo(peer.id, address, isValidPort(port) ? port : peer.port);
-    moved = book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port }) || moved;
-    if (moved) changed();
+    if (peer.kind === 'pc') {
+      // 키를 가진 진짜 그 PC가 보낸 요청이므로 주소가 바뀌었으면 새 주소를 믿어도 된다
+      const address = plainAddress(req.socket.remoteAddress);
+      const port = Number(req.headers['x-app-port']);
+      let moved = book.moveTo(peer.id, address, isValidPort(port) ? port : peer.port);
+      moved = book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port }) || moved;
+      if (moved) changed();
+    }
     return peer;
   }
 
-  // ---- 인증 없이 받는 요청: 연결 요청, 신원 확인 ----
+  // ---- 인증 없이 받는 요청: 연결 요청 ----
 
   async function handlePublic(req, res, url) {
-    const { pathname } = url;
-    if (pathname === '/api/pair' && req.method === 'POST') {
-      await receivePairRequest(req, res);
-      return true;
-    }
-    if (pathname === '/api/peer-proof' && req.method === 'GET') {
-      const from = url.searchParams.get('from');
-      const nonce = url.searchParams.get('nonce');
-      const peer = PEER_ID.test(from || '') && NONCE.test(nonce || '') ? book.getPaired(from) : null;
-      if (!peer) sendJson(res, 404, { error: '연결된 PC가 아니에요.' });
-      else sendJson(res, 200, { id: self().id, proof: pairProof(peer.recvKey, nonce, from, self().id) });
-      return true;
-    }
-    return false;
-  }
-
-  async function receivePairRequest(req, res) {
+    if (req.method !== 'POST' || (url.pathname !== '/api/pair/start' && url.pathname !== '/api/pair/finish')) return false;
     // 웹사이트가 브라우저를 시켜 몰래 연결 요청을 보내지 못하게 한다 (이 헤더는 스크립트가 다른 사이트로 보낼 수 없다)
     if (req.headers['x-requested-with'] !== APP_ID) {
       rejectBody(req, res);
-      return sendJson(res, 403, { error: '허용되지 않은 요청이에요.' });
+      sendJson(res, 403, { error: '허용되지 않은 요청이에요.' });
+      return true;
     }
+    if (!req.socket.encrypted) {
+      rejectBody(req, res);
+      sendJson(res, 400, { error: '암호화된 연결(HTTPS)로만 연결할 수 있어요.' });
+      return true;
+    }
+    if (url.pathname === '/api/pair/start') await pairStart(req, res);
+    else await pairFinish(req, res);
+    return true;
+  }
+
+  async function pairStart(req, res) {
     let body;
     try {
-      body = await readJson(req, 4096);
+      body = await readJson(req, 16 * 1024);
     } catch {
       return sendJson(res, 413, { error: '잘못된 요청이에요.' });
     }
     const name = cleanName(body?.name);
-    if (!body || !PEER_ID.test(body.id || '') || !name || !isValidPort(body.port) || !isValidKey(body.key) || !/^\d{4}$/.test(body.code || '')) {
-      return sendJson(res, 400, { error: '잘못된 연결 요청이에요.' });
-    }
+    const kind = body?.kind;
+    const valid =
+      body &&
+      PEER_ID.test(body.id || '') &&
+      name &&
+      COMMIT.test(body.commit || '') &&
+      (kind === 'app' || (kind === 'pc' && isValidPort(body.port) && isValidKey(body.key) && isValidCert(body.cert)));
+    if (!valid) return sendJson(res, 400, { error: '잘못된 연결 요청이에요.' });
     if (body.id === self().id) return sendJson(res, 400, { error: '자기 자신과는 연결할 수 없어요.' });
-    if (pending) return sendJson(res, 409, { error: '다른 연결 요청을 처리하는 중이에요.' });
+    if (pending && !(pending.stage === 'committed' && pending.id === body.id)) {
+      return sendJson(res, 409, { error: '다른 연결 요청을 처리하는 중이에요.' });
+    }
+    if (pending) clearTimeout(pending.timer); // 같은 기기가 다시 시도하면 새 요청으로 바꾼다
 
     const request = {
-      rid: crypto.randomBytes(8).toString('hex'),
+      rid: newNonce().slice(0, 16),
+      stage: 'committed',
       id: body.id,
       name,
+      kind,
       address: plainAddress(req.socket.remoteAddress),
-      port: body.port,
-      key: body.key,
-      code: body.code,
+      port: kind === 'pc' ? body.port : null,
+      cert: kind === 'pc' ? body.cert : null,
+      key: kind === 'pc' ? body.key : null,
+      commit: body.commit,
+      nb: newNonce(),
     };
+    request.timer = setTimeout(() => {
+      if (pending === request) pending = null;
+    }, COMMIT_TIMEOUT_MS);
+    pending = request;
+    return sendJson(res, 200, { id: self().id, name: self().name, nb: request.nb });
+  }
+
+  async function pairFinish(req, res) {
+    let body;
+    try {
+      body = await readJson(req, 1024);
+    } catch {
+      return sendJson(res, 413, { error: '잘못된 요청이에요.' });
+    }
+    const request = pending;
+    if (!request || request.stage !== 'committed' || body?.id !== request.id) {
+      return sendJson(res, 409, { error: '연결 요청이 만료됐어요. 다시 시도해 주세요.' });
+    }
+    clearTimeout(request.timer);
+    if (!NONCE.test(body.na || '') || sha256(body.na) !== request.commit) {
+      pending = null;
+      return sendJson(res, 400, { error: '확인 값이 맞지 않아요.' });
+    }
+    const initiator = request.kind === 'pc' ? fingerprintOf(request.cert) : `app:${request.id}`;
+    request.code = pairCode(initiator, identity.fingerprint, body.na, request.nb);
+    request.stage = 'asking';
+
     const decision = await new Promise((resolve) => {
-      pending = { ...request, resolve };
-      const timer = setTimeout(() => resolve('timeout'), pairTimeoutMs);
-      pending.timer = timer;
+      request.resolve = resolve;
+      request.timer = setTimeout(() => resolve('timeout'), pairTimeoutMs);
       // 요청한 쪽이 기다리다 포기하면(창을 닫는 등) 여기 요청도 거둔다
       res.on('close', () => {
         if (!res.writableFinished) resolve('gone');
@@ -137,21 +182,22 @@ export function createPeerApi({
       log('pair-request', publicRequest(request));
       if (!hasHostPage()) showHostPage();
     });
-    clearTimeout(pending.timer);
-    pending = null;
+    clearTimeout(request.timer);
+    if (pending === request) pending = null;
     broadcastHost('pair-request-done', { rid: request.rid, decision });
 
     if (decision === 'accept') {
       const recvKey = newPeerKey();
-      book.pair({ id: request.id, name, address: request.address, port: request.port, sendKey: request.key, recvKey });
-      book.saw({ id: request.id, name, address: request.address, port: request.port });
+      const { id, name, kind, address, port, cert, key } = request;
+      book.pair({ id, name, kind, address, port, cert, sendKey: key, recvKey });
+      if (kind === 'pc') book.saw({ id, name, address, port });
       changed();
       log('paired', name);
-      return sendJson(res, 200, { id: self().id, name: self().name, key: recvKey });
+      return sendJson(res, 200, { key: recvKey });
     }
-    if (decision === 'deny') return sendJson(res, 403, { error: '상대 PC에서 거절했어요.' });
-    if (decision === 'timeout') return sendJson(res, 408, { error: '상대 PC에서 응답이 없어요.' });
-    // 'gone': 연결이 이미 끊겼다
+    if (decision === 'deny') return sendJson(res, 403, { error: '상대 기기에서 거절했어요.' });
+    if (decision === 'timeout') return sendJson(res, 408, { error: '상대 기기에서 응답이 없어요.' });
+    // 'gone', 'closing': 연결이 이미 끊겼다
   }
 
   // ---- 인증된 요청 ----
@@ -160,11 +206,11 @@ export function createPeerApi({
     const { pathname } = url;
     const method = req.method;
 
-    // 연결된 PC가 보내는 요청
+    // 연결된 기기가 스스로 연결을 끊을 때
     if (pathname === '/api/peer/unpair' && method === 'POST') {
       rejectBody(req, res);
       if (!ctx.peer) {
-        sendJson(res, 403, { error: '연결된 PC만 할 수 있어요.' });
+        sendJson(res, 403, { error: '연결된 기기만 할 수 있어요.' });
         return true;
       }
       book.unpair(ctx.peer.id);
@@ -201,7 +247,7 @@ export function createPeerApi({
     let m;
     if ((m = /^\/api\/pair-requests\/([0-9a-f]{16})\/(accept|deny)$/.exec(pathname)) && method === 'POST') {
       rejectBody(req, res);
-      if (pending?.rid === m[1]) {
+      if (pending?.stage === 'asking' && pending.rid === m[1]) {
         pending.resolve(m[2]);
         sendEmpty(res);
       } else {
@@ -211,20 +257,22 @@ export function createPeerApi({
     }
     if ((m = /^\/api\/peers\/([0-9a-f]{16})\/pair$/.exec(pathname)) && method === 'POST') {
       rejectBody(req, res);
-      startPairing(res, m[1]);
+      await startPairing(res, m[1]);
       return true;
     }
     if ((m = /^\/api\/peers\/([0-9a-f]{16})$/.exec(pathname)) && method === 'DELETE') {
       rejectBody(req, res);
       const peer = book.unpair(m[1]);
       if (!peer) {
-        sendJson(res, 404, { error: '연결된 PC가 아니에요.' });
+        sendJson(res, 404, { error: '연결된 기기가 아니에요.' });
         return true;
       }
       changed();
       log('unpaired', peer.name);
       // 상대 PC에도 알린다. 꺼져 있으면 다음에 보낼 때 상대가 알아서 거절한다.
-      requestJson(peer, { method: 'POST', path: '/api/peer/unpair', headers: peerHeaders(peer), timeout: 3000 }).catch(() => {});
+      if (peer.kind === 'pc') {
+        requestJson(peer, { method: 'POST', path: '/api/peer/unpair', headers: peerHeaders(peer), pin: peer.cert, timeout: 3000 }).catch(() => {});
+      }
       sendEmpty(res);
       return true;
     }
@@ -253,9 +301,11 @@ export function createPeerApi({
     }
     const target = parseAddress(body?.address);
     if (!target) return sendJson(res, 400, { error: '주소를 확인해 주세요. 예: 192.168.0.40' });
-    const info = await pingApp(target, 3000);
+    const info = await pingApp(target, { timeout: 3000 });
     if (!info) {
-      return sendJson(res, 404, { error: `${target.address}에서 ${APP_NAME} 프로그램을 찾지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.` });
+      return sendJson(res, 404, {
+        error: `${target.address}에서 ${APP_NAME} 프로그램을 찾지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.`,
+      });
     }
     if (!PEER_ID.test(info.id || '')) return sendJson(res, 400, { error: `그 PC의 ${APP_NAME} 프로그램을 최신 버전으로 바꿔 주세요.` });
     if (info.id === self().id) return sendJson(res, 400, { error: '이 PC의 주소예요. 다른 PC의 주소를 넣어 주세요.' });
@@ -263,37 +313,53 @@ export function createPeerApi({
     return sendJson(res, 200, { peer: book.list().find((p) => p.id === info.id) });
   }
 
-  function startPairing(res, id) {
+  async function startPairing(res, id) {
     const target = book.target(id);
     if (!target) return sendJson(res, 404, { error: '그 PC를 찾을 수 없어요. 다시 찾아 주세요.' });
-    const code = newPairCode();
+    const me = self();
+    const na = newNonce();
     const recvKey = newPeerKey();
+
+    // 1단계: 내 정보와 봉인한 난수를 보내고, 상대 인증서와 난수를 받는다
+    let first;
+    try {
+      first = await requestJson(target, {
+        method: 'POST',
+        path: '/api/pair/start',
+        body: { id: me.id, name: me.name, kind: 'pc', port: me.port, cert: identity.cert, key: recvKey, commit: sha256(na) },
+        timeout: 8000,
+      });
+    } catch {
+      return sendJson(res, 502, { error: offlineMessage(target.name) });
+    }
+    if (first.status === 409) {
+      return sendJson(res, 409, { error: `${target.name}에서 다른 연결 요청을 처리하는 중이에요. 잠시 뒤 다시 시도해 주세요.` });
+    }
+    if (first.status !== 200 || first.json?.id !== id || !NONCE.test(first.json?.nb || '') || !first.cert) {
+      return sendJson(res, 502, { error: first.json?.error || '다른 PC가 응답했어요. 목록을 새로 고친 뒤 다시 시도해 주세요.' });
+    }
+    const peerCert = first.cert;
+    const code = pairCode(identity.fingerprint, fingerprintOf(peerCert), na, first.json.nb);
     sendJson(res, 202, { code });
 
-    const me = self();
-    requestJson(target, {
-      method: 'POST',
-      path: '/api/pair',
-      body: { id: me.id, name: me.name, port: me.port, key: recvKey, code },
-      timeout: pairTimeoutMs + 15_000,
-    })
+    // 2단계: 받은 인증서로 고정한 연결로 난수를 공개하고, 상대가 [허용]을 누를 때까지 기다린다
+    requestJson(target, { method: 'POST', path: '/api/pair/finish', body: { id: me.id, na }, pin: peerCert, timeout: pairTimeoutMs + 15_000 })
       .then(({ status, json }) => {
-        if (status === 200 && json?.id === id && isValidKey(json.key)) {
-          const name = cleanName(json.name) || target.name;
-          book.pair({ id, name, address: target.address, port: target.port, sendKey: json.key, recvKey });
+        if (status === 200 && isValidKey(json?.key)) {
+          const name = cleanName(first.json.name) || target.name;
+          book.pair({ id, name, kind: 'pc', address: target.address, port: target.port, cert: peerCert, sendKey: json.key, recvKey });
           book.saw({ id, name, address: target.address, port: target.port });
           log('paired', name);
           return { id, ok: true, name };
         }
         const reasons = {
-          200: '다른 PC가 응답했어요. 목록을 새로 고친 뒤 다시 시도해 주세요.',
           403: `${target.name}에서 거절했어요.`,
           408: `${target.name}에서 응답이 없어 취소됐어요. 그 PC의 ${APP_NAME} 화면을 연 뒤 다시 시도해 주세요.`,
-          409: `${target.name}에서 다른 연결 요청을 처리하는 중이에요. 잠시 뒤 다시 시도해 주세요.`,
+          409: '연결 요청이 만료됐어요. 다시 시도해 주세요.',
         };
         return { id, ok: false, error: reasons[status] || json?.error || '연결하지 못했어요.' };
       })
-      .catch(() => ({ id, ok: false, error: `${target.name}에 연결하지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.` }))
+      .catch(() => ({ id, ok: false, error: '연결이 끊겼어요. 다시 시도해 주세요.' }))
       .then((result) => {
         // 화면이 새 목록을 먼저 받아야 결과를 보고 바로 그 PC를 고를 수 있다
         changed();
@@ -305,7 +371,7 @@ export function createPeerApi({
 
   async function sendToPeer(req, res, url, id, kind) {
     const peer = book.getPaired(id);
-    if (!peer) {
+    if (peer?.kind !== 'pc') {
       rejectBody(req, res);
       return sendJson(res, 404, { error: '연결된 PC가 아니에요. 다시 연결해 주세요.' });
     }
@@ -323,11 +389,13 @@ export function createPeerApi({
       targetPath = `/api/upload?${params}`;
     }
 
-    const out = http.request({
+    const out = https.request({
       host: peer.address,
       port: peer.port,
       method: 'POST',
       path: targetPath,
+      agent: false,
+      ...pinnedTlsOptions(peer.cert),
       headers: {
         'Content-Length': length,
         'Content-Type': kind === 'text' ? 'application/json' : 'application/octet-stream',
@@ -395,51 +463,41 @@ export function createPeerApi({
   /** UDP로 다른 PC를 발견했을 때 */
   function discovered(info) {
     const paired = book.getPaired(info.id);
-    if (!paired || (paired.address === info.address && paired.port === info.port)) {
-      if (book.saw(info)) changed();
+    if (paired?.kind !== 'pc' || (paired.address === info.address && paired.port === info.port)) {
+      if (paired?.kind !== 'app' && book.saw(info)) changed();
       return;
     }
     // 연결해 둔 PC가 다른 주소에서 나타났다. UDP 알림은 누구나 꾸밀 수 있으므로
-    // 그 주소의 PC가 우리끼리만 아는 키를 갖고 있는지 확인한 뒤에만 새 주소를 쓴다.
+    // 그 주소에 저장해 둔 인증서로 접속이 되는지(=진짜 그 PC인지) 확인한 뒤에만 새 주소를 쓴다.
     const now = Date.now();
     if (now - (lastVerify.get(info.id) || 0) < verifyCooldownMs) return;
     lastVerify.set(info.id, now);
-    verifyAt(paired, info.address, info.port).then((ok) => {
-      if (!ok) return;
+    pingApp({ address: info.address, port: info.port }, { pin: paired.cert, timeout: 3000 }).then((pong) => {
+      if (pong?.id !== info.id) return;
       book.moveTo(info.id, info.address, info.port);
       book.saw(info);
       changed();
     });
   }
 
-  async function verifyAt(peer, address, port) {
-    const nonce = crypto.randomBytes(16).toString('hex');
-    try {
-      const { status, json } = await requestJson(
-        { address, port },
-        { path: `/api/peer-proof?from=${self().id}&nonce=${nonce}`, timeout: 3000 },
-      );
-      return status === 200 && json?.id === peer.id && safeEqual(json.proof, pairProof(peer.sendKey, nonce, self().id, peer.id));
-    } catch {
-      return false;
-    }
-  }
-
-  /** 연결된 PC들이 켜져 있는지 HTTP로 확인한다 (UDP가 막힌 네트워크에서도 상태가 맞도록) */
+  /** 연결된 PC들이 켜져 있는지 확인한다 (UDP가 막힌 네트워크에서도 상태가 맞도록) */
   async function refresh() {
     const before = book.signature();
     await Promise.all(
-      [...book.paired.values()].map(async (peer) => {
-        const info = await pingApp(peer);
-        if (info?.id === peer.id) book.saw({ id: peer.id, name: cleanName(info.name) || peer.name, address: peer.address, port: peer.port });
-        else book.lost(peer.id);
-      }),
+      [...book.paired.values()]
+        .filter((peer) => peer.kind === 'pc')
+        .map(async (peer) => {
+          const info = await pingApp(peer, { pin: peer.cert });
+          if (info?.id === peer.id) book.saw({ id: peer.id, name: cleanName(info.name) || peer.name, address: peer.address, port: peer.port });
+          else book.lost(peer.id);
+        }),
     );
     if (book.signature() !== before) changed();
   }
 
   function close() {
-    pending?.resolve('closing');
+    if (pending?.stage === 'asking') pending.resolve('closing');
+    clearTimeout(pending?.timer);
   }
 
   return { authenticate, handlePublic, handle, snapshot, discovered, refresh, close };

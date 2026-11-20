@@ -12,6 +12,7 @@ import { lanAddresses, broadcastAddresses } from './src/net.js';
 import { PeerBook, newPeerId, cleanName, pingApp } from './src/peers.js';
 import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME } from './src/brand.js';
 import { startDiscovery } from './src/discovery.js';
+import { loadIdentity } from './src/tls.js';
 import { encodeQR, toTerminal } from './src/qr.js';
 import { openUrl, openPath, revealPath } from './src/open.js';
 import { publicNetworkAdapters } from './src/windows.js';
@@ -158,7 +159,8 @@ function logEvent(type, payload) {
     const what = item?.kind === 'file' ? `${item.name} (${formatSize(item.size)})` : '텍스트';
     console.log(`  [${time}] PC → ${to}  ${what}`);
   } else if (type === 'pair-request') {
-    console.log(`  [${time}] ${payload.name}(${payload.address})에서 연결을 요청했어요. 확인 숫자 ${payload.code} — ${APP_NAME} 화면에서 허용해 주세요.`);
+    const who = payload.kind === 'app' ? `${payload.name}(휴대폰 앱, ${payload.address})` : `${payload.name}(${payload.address})`;
+    console.log(`  [${time}] ${who}에서 연결을 요청했어요. 확인 숫자 ${payload.code.slice(0, 3)} ${payload.code.slice(3)} — ${APP_NAME} 화면에서 허용해 주세요.`);
   } else if (type === 'paired') {
     console.log(`  [${time}] ${payload} 연결됨 — 이제 서로 파일을 보낼 수 있어요`);
   } else if (type === 'unpaired') {
@@ -195,12 +197,14 @@ async function main() {
 
   const store = new Store(path.join(home, 'items.json')).load();
   const peerBook = new PeerBook(path.join(home, 'peers.json')).load();
+  const identity = loadIdentity(home, pcName); // 다른 PC·앱과 암호화해서 주고받을 때 쓰는 인증서
   await cleanup(outboxDir, receivedDir, store);
 
   const host = args.host ?? '0.0.0.0';
   const localOnly = ['127.0.0.1', 'localhost', '::1'].includes(host);
 
-  // 휴대폰이 접속할 네트워크가 '공용 네트워크'면 방화벽에 막히기 쉬워서 미리 알려 준다.
+  // 네트워크가 '공용 네트워크'면 미리 알려 준다. 집 Wi-Fi라면 방화벽에 막히기 쉽고,
+  // 정말 여러 사람이 쓰는 Wi-Fi라면 휴대폰 브라우저와 주고받는 내용(HTTP)을 엿볼 수 있다.
   let networkWarnings = [];
   const checkNetworks = () =>
     publicNetworkAdapters().then((adapters) => {
@@ -208,8 +212,10 @@ async function main() {
         .filter((a) => adapters.includes(a.iface))
         .map(
           ({ iface }) =>
-            `‘${iface}’ 네트워크가 공용 네트워크로 설정되어 있어요. 휴대폰이 접속하지 못하면 ` +
-            `설정 → 네트워크 및 인터넷 → ${iface} → 연결된 네트워크 속성에서 ‘개인 네트워크’로 바꿔 주세요.`,
+            `‘${iface}’ 네트워크가 공용 네트워크로 설정되어 있어요. ` +
+            `집 Wi-Fi라면 설정 → 네트워크 및 인터넷 → ${iface} → 연결된 네트워크 속성에서 ‘개인 네트워크’로 바꿔 주세요(휴대폰 접속이 막힐 수 있어요). ` +
+            `카페·회사처럼 여러 사람이 쓰는 Wi-Fi라면 휴대폰 브라우저로 주고받는 내용은 암호화되지 않으니, 휴대폰 핫스팟에 PC를 연결해서 쓰세요. ` +
+            `(PC끼리, 그리고 ${APP_NAME} 앱은 항상 암호화돼요)`,
         );
     });
   const publicCheck = localOnly ? Promise.resolve() : checkNetworks();
@@ -225,6 +231,7 @@ async function main() {
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self: { id: config.id, name: pcName },
+    tls: identity,
     peerBook,
     announce: () => discovery?.announce(),
     showHostPage: () => {

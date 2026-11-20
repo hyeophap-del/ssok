@@ -1,20 +1,22 @@
-// 다른 PC의 같은 프로그램과 연결하기: 연결된 PC 목록, 주변 PC, PC끼리 주고받는 요청
+// 다른 기기(PC, 휴대폰 앱)와 연결하기: 연결된 기기 목록, 주변 PC, 기기끼리 주고받는 암호화된 요청
 import fs from 'node:fs';
 import path from 'node:path';
-import http from 'node:http';
+import https from 'node:https';
 import crypto from 'node:crypto';
 import { APP_ID } from './brand.js';
+import { isValidCert, pemFromDer, pinnedTlsOptions } from './tls.js';
 
 export const DEFAULT_PORT = 8765;
 export const PEER_ID = /^[0-9a-f]{16}$/;
+export const NONCE = /^[0-9a-f]{32}$/;
 const PEER_KEY = /^[A-Za-z0-9_-]{20,100}$/;
 const ONLINE_MS = 75_000; // 이 시간 동안 소식이 없으면 꺼진 것으로 본다
 const MAX_SEEN = 64;
 
 export const newPeerId = () => crypto.randomBytes(8).toString('hex');
 export const newPeerKey = () => crypto.randomBytes(24).toString('base64url');
-/** 두 PC 화면에 함께 띄워서 맞는 상대인지 눈으로 확인하는 네 자리 숫자 */
-export const newPairCode = () => String(crypto.randomInt(1000, 10000));
+export const newNonce = () => crypto.randomBytes(16).toString('hex');
+export const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
 export function cleanName(name) {
   if (typeof name !== 'string') return '';
@@ -41,11 +43,18 @@ export function safeEqual(a, b) {
 }
 
 /**
- * 상대가 정말 연결해 둔 그 PC인지 확인하는 서명. 두 PC만 아는 키로 만들기 때문에
- * 같은 Wi-Fi의 다른 기기가 그 PC인 척 주소를 바꿔치기할 수 없다. 키 자체는 보내지 않는다.
+ * 두 화면에 띄워 눈으로 맞춰 보는 6자리 확인 숫자.
+ * 요청한 쪽의 신원(인증서 지문), 받는 쪽 인증서 지문, 양쪽이 낸 난수로 계산한다.
+ * 중간에서 누가 끼어들면 양쪽이 보는 인증서가 달라져 숫자가 어긋난다.
+ * 요청한 쪽은 자기 난수를 먼저 '봉인'(해시)해서 보내고, 상대 난수를 받은 뒤에야 공개하므로
+ * 끼어든 쪽이 숫자를 일부러 맞추려고 값을 골라 볼 수 없다.
  */
-export function pairProof(key, nonce, fromId, toId) {
-  return crypto.createHmac('sha256', key).update(`${APP_ID}-proof\n${nonce}\n${fromId}\n${toId}`).digest('base64url');
+export function pairCode(initiator, responderFingerprint, initiatorNonce, responderNonce) {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${APP_ID}-pair\n${initiator}\n${responderFingerprint}\n${initiatorNonce}\n${responderNonce}`)
+    .digest();
+  return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, '0');
 }
 
 /** "192.168.0.40", "192.168.0.40:8766", "DESKTOP-ABC" 같은 입력을 주소와 포트로 나눈다. */
@@ -61,17 +70,23 @@ export function parseAddress(input) {
   return { address: m[1], port };
 }
 
-/** 다른 PC의 이 프로그램에 JSON 요청을 보낸다. 응답이 JSON이 아니면 json은 null. */
-export function requestJson({ address, port }, { method = 'GET', path: urlPath, body, headers = {}, timeout = 5000 }) {
+/**
+ * 다른 PC의 이 프로그램에 암호화된(HTTPS) JSON 요청을 보낸다.
+ * pin(상대 인증서)이 있으면 그 인증서가 아닐 때 아무것도 보내지 않고 실패한다.
+ * pin이 없으면(처음 연결할 때) 상대 인증서를 받아 와서 돌려준다.
+ */
+export function requestJson({ address, port }, { method = 'GET', path: urlPath, body, headers = {}, timeout = 5000, pin = null }) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-    const req = http.request(
+    const req = https.request(
       {
         host: address,
         port,
         method,
         path: urlPath,
         timeout,
+        agent: false,
+        ...(pin ? pinnedTlsOptions(pin) : { rejectUnauthorized: false }),
         headers: {
           'X-Requested-With': APP_ID,
           ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
@@ -79,6 +94,8 @@ export function requestJson({ address, port }, { method = 'GET', path: urlPath, 
         },
       },
       (res) => {
+        const raw = res.socket.getPeerCertificate?.()?.raw;
+        const cert = raw ? pemFromDer(raw) : null;
         const chunks = [];
         let size = 0;
         res.on('data', (chunk) => {
@@ -93,7 +110,7 @@ export function requestJson({ address, port }, { method = 'GET', path: urlPath, 
           } catch {
             // JSON이 아닌 응답
           }
-          resolve({ status: res.statusCode, json });
+          resolve({ status: res.statusCode, json, cert });
         });
         res.on('error', reject);
       },
@@ -105,9 +122,9 @@ export function requestJson({ address, port }, { method = 'GET', path: urlPath, 
 }
 
 /** 그 주소에서 이 프로그램이 돌고 있으면 ping 응답({app, version, id, name})을, 아니면 null을 준다. */
-export async function pingApp(target, timeout = 1500) {
+export async function pingApp(target, { timeout = 1500, pin = null } = {}) {
   try {
-    const { status, json } = await requestJson(target, { path: '/api/ping', timeout });
+    const { status, json } = await requestJson(target, { path: '/api/ping', timeout, pin });
     return status === 200 && json?.app === APP_ID ? json : null;
   } catch {
     return null;
@@ -115,10 +132,11 @@ export async function pingApp(target, timeout = 1500) {
 }
 
 /**
- * 연결해 둔 PC(paired)와 지금 네트워크에서 보이는 PC(seen)를 관리한다.
- * 연결해 둔 PC는 서로 주고받은 키와 함께 파일에 저장한다.
- *  - sendKey: 내가 그 PC에 요청할 때 내미는 키 (그 PC가 만들어 준 것)
- *  - recvKey: 그 PC가 나에게 요청할 때 내미는 키 (내가 만들어 준 것)
+ * 연결해 둔 기기(paired)와 지금 네트워크에서 보이는 PC(seen)를 관리한다. 연결해 둔 기기는 파일에 저장한다.
+ *  - kind: 'pc'(다른 PC, 서로 보낼 수 있음) 또는 'app'(휴대폰 앱, 이 PC로 보내기만 함)
+ *  - cert: 그 PC의 인증서 (PC만. 그 PC에 접속할 때 이 인증서로 고정한다)
+ *  - sendKey: 내가 그 PC에 요청할 때 내미는 키 (그 PC가 만들어 준 것, PC만)
+ *  - recvKey: 그 기기가 나에게 요청할 때 내미는 키 (내가 만들어 준 것)
  */
 export class PeerBook {
   constructor(file, { now = Date.now } = {}) {
@@ -132,10 +150,11 @@ export class PeerBook {
     try {
       const data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       for (const peer of data.peers || []) {
+        // 암호화 이전 버전에서 연결한 PC(인증서 없음)는 다시 연결해야 한다
         if (isValidPairedPeer(peer)) this.paired.set(peer.id, peer);
       }
     } catch (err) {
-      if (err.code !== 'ENOENT') console.warn(`연결된 PC 목록을 읽지 못했어요: ${err.message}`);
+      if (err.code !== 'ENOENT') console.warn(`연결된 기기 목록을 읽지 못했어요: ${err.message}`);
     }
     return this;
   }
@@ -143,7 +162,7 @@ export class PeerBook {
   save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, peers: [...this.paired.values()] }, null, 1));
+    fs.writeFileSync(tmp, JSON.stringify({ version: 2, peers: [...this.paired.values()] }, null, 1), { mode: 0o600 });
     fs.renameSync(tmp, this.file);
   }
 
@@ -151,7 +170,7 @@ export class PeerBook {
     return this.paired.get(id) ?? null;
   }
 
-  /** 상대가 내민 키로 어느 PC인지 찾는다 */
+  /** 상대가 내민 키로 어느 기기인지 찾는다 */
   byKey(key) {
     if (!isValidKey(key)) return null;
     for (const peer of this.paired.values()) {
@@ -188,15 +207,17 @@ export class PeerBook {
   /** 확인된 새 주소로 바꾼다 (IP가 바뀐 경우) */
   moveTo(id, address, port) {
     const peer = this.paired.get(id);
-    if (!peer || (peer.address === address && peer.port === port)) return false;
+    if (!peer || peer.kind !== 'pc' || (peer.address === address && peer.port === port)) return false;
     peer.address = address;
     peer.port = port;
     this.save();
     return true;
   }
 
-  pair({ id, name, address, port, sendKey, recvKey }) {
-    this.paired.set(id, { id, name, address, port, sendKey, recvKey, pairedAt: this.now() });
+  pair(peer) {
+    const { id, name, kind, address, port, cert, sendKey, recvKey } = peer;
+    const record = kind === 'app' ? { id, name, kind, recvKey } : { id, name, kind, address, port, cert, sendKey, recvKey };
+    this.paired.set(id, { ...record, pairedAt: this.now() });
     this.save();
   }
 
@@ -204,6 +225,7 @@ export class PeerBook {
     const peer = this.paired.get(id);
     if (!peer) return null;
     this.paired.delete(id);
+    this.seen.delete(id);
     this.save();
     return peer;
   }
@@ -213,24 +235,32 @@ export class PeerBook {
     return Boolean(seen && this.now() - seen.lastSeen < ONLINE_MS);
   }
 
-  /** 화면에 보여 줄 목록 (키는 빼고). 연결된 PC 먼저, 그다음 주변 PC. */
+  /** 화면에 보여 줄 목록 (키·인증서는 빼고). 연결된 기기 먼저, 그다음 주변 PC. */
   list() {
     const out = [];
     for (const peer of this.paired.values()) {
-      out.push({ id: peer.id, name: peer.name, address: peer.address, port: peer.port, paired: true, online: this.isOnline(peer.id) });
+      out.push({
+        id: peer.id,
+        name: peer.name,
+        kind: peer.kind,
+        address: peer.address ?? null,
+        port: peer.port ?? null,
+        paired: true,
+        online: this.isOnline(peer.id),
+      });
     }
     for (const seen of this.seen.values()) {
       if (this.paired.has(seen.id) || !this.isOnline(seen.id)) continue;
-      out.push({ id: seen.id, name: seen.name, address: seen.address, port: seen.port, paired: false, online: true });
+      out.push({ id: seen.id, name: seen.name, kind: 'pc', address: seen.address, port: seen.port, paired: false, online: true });
     }
     const collator = new Intl.Collator('ko');
     return out.sort((a, b) => Number(b.paired) - Number(a.paired) || collator.compare(a.name, b.name));
   }
 
-  /** 다른 PC로 요청을 보낼 대상 (연결된 PC면 저장된 주소, 아니면 마지막으로 본 주소) */
+  /** 연결하려고 찾아갈 PC (연결된 PC면 저장된 주소, 아니면 마지막으로 본 주소) */
   target(id) {
     const paired = this.paired.get(id);
-    if (paired) return paired;
+    if (paired?.kind === 'pc') return paired;
     const seen = this.seen.get(id);
     return seen && this.isOnline(id) ? seen : null;
   }
@@ -242,13 +272,13 @@ export class PeerBook {
 }
 
 function isValidPairedPeer(peer) {
+  if (!peer || !PEER_ID.test(peer.id) || typeof peer.name !== 'string' || !isValidKey(peer.recvKey)) return false;
+  if (peer.kind === 'app') return true;
   return (
-    peer &&
-    PEER_ID.test(peer.id) &&
-    typeof peer.name === 'string' &&
+    peer.kind === 'pc' &&
     typeof peer.address === 'string' &&
     isValidPort(peer.port) &&
     isValidKey(peer.sendKey) &&
-    isValidKey(peer.recvKey)
+    isValidCert(peer.cert)
   );
 }
