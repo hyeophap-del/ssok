@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { sanitizeFilename, moveIntoPlace, mimeOf, isInlineSafe, contentDisposition } from './files.js';
 import { isAllowedHost, isOwnAddress } from './net.js';
 import { encodeQR, toSvg } from './qr.js';
-import { sendJson, sendText, sendEmpty, rejectBody, readBody } from './http.js';
+import { sendJson, sendText, sendEmpty, rejectBody, readBody, readJson } from './http.js';
 import { safeEqual } from './peers.js';
 import { createPeerApi } from './peer-api.js';
 import { createDualServer } from './tls.js';
@@ -165,6 +165,7 @@ export function createApp(options) {
     relayUrl = () => null, // 이 PC가 쓰는 중계 서버 주소 (연결된 다른 PC에게 알려 줘서 집 밖에서도 보내게 한다)
     relayPairCode = null, // 다른 곳의 PC가 처음 연결할 때 넣을 코드 받기 (중계 서버)
     tunnelPorts = new Set(), // 중계 통로가 이 PC의 쏙에 붙은 포트 (이 PC 안에서 온 연결이지만 바깥 요청이다)
+    drops = null, // 받기 링크 목록 (src/drops.js). 쏙이 없는 사람이 링크로 이 PC에 보낼 때
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -204,7 +205,7 @@ export function createApp(options) {
   const staticFiles = new Map();
   for (const name of fs.readdirSync(publicDir)) {
     const type = STATIC_TYPES[path.extname(name)];
-    if (type && !name.startsWith('relay-admin')) staticFiles.set(name, { path: path.join(publicDir, name), type }); // 중계 서버 관리 화면 파일은 내주지 않는다
+    if (type && !name.startsWith('relay-admin') && !name.startsWith('drop.')) staticFiles.set(name, { path: path.join(publicDir, name), type }); // 중계 서버 관리 화면 파일은 내주지 않는다
   }
 
   const onRequest = (req, res) => {
@@ -243,6 +244,11 @@ export function createApp(options) {
       (Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey)) ||
       // 다른 곳의 PC가 처음 연결할 때 중계 통로를 그대로 지나 이 PC에 붙은 연결 (그 안에서 HTTPS를 한다)
       (tunnelPorts.has(req.socket.remotePort) && isLoopback(req.socket.remoteAddress));
+    // 받기 링크로 온 요청 (중계로만 온다): 그 링크로 보내기만 할 수 있다
+    if (viaRelay && req.headers['x-ssok-drop'] !== undefined) {
+      const link = drops?.active(String(req.headers['x-ssok-drop'])) ?? null;
+      return { isHost: false, viaRelay, authed: Boolean(link), drop: link, giveCookie: false, device: link ? `${link.label} · 받기 링크` : '받기 링크' };
+    }
     // 연결해 둔 다른 PC는 서로 주고받은 키로 들어온다. 같은 PC에서 왔더라도 'PC 화면' 권한은 주지 않는다.
     const peer = peers?.authenticate(req, { viaRelay });
     if (peer !== undefined) {
@@ -300,6 +306,26 @@ export function createApp(options) {
         return sendJson(res, 403, { error: '허용되지 않은 요청이에요.' });
       }
     }
+
+    // 받기 링크: 보내기(파일·텍스트)와 받는 PC 이름 확인만 된다. 목록·받기·설정은 막는다.
+    if (ctx.drop) {
+      if (pathname === '/api/drop-info' && method === 'GET') {
+        return sendJson(res, 200, { name: self.name, label: ctx.drop.label, expiresAt: ctx.drop.expiresAt });
+      }
+      if (pathname === '/api/upload' && method === 'POST') {
+        drops.record(ctx.drop.id, Number(req.headers['content-length']) || 0);
+        broadcastHost('drops', dropList());
+        return upload(req, res, url, ctx);
+      }
+      if (pathname === '/api/text' && method === 'POST') {
+        drops.record(ctx.drop.id, Number(req.headers['content-length']) || 0);
+        broadcastHost('drops', dropList());
+        return postText(req, res, ctx);
+      }
+      rejectBody(req, res);
+      return sendJson(res, 403, { error: '받기 링크로는 보내기만 할 수 있어요.' });
+    }
+    if (pathname === '/api/drops' || pathname.startsWith('/api/drops/')) return dropsApi(req, res, url, ctx);
 
     if (peers && (await peers.handle(req, res, url, ctx))) return;
     if (pathname === '/api/session' && method === 'GET') return sendJson(res, 200, session(ctx, req));
@@ -375,6 +401,7 @@ export function createApp(options) {
       addresses,
       tailscale: anywhere || null,
       relay: relayInfo(),
+      drops: drops ? dropList() : null,
       port,
       name: self.name,
       peerSupport: Boolean(peers),
@@ -384,6 +411,63 @@ export function createApp(options) {
       canQuit: Boolean(onQuit),
       warnings: warnings(),
     };
+  }
+
+/** 받기 링크 목록 (PC 화면용). 링크 주소는 중계 서버를 설정했을 때만 만들 수 있다. */
+  function dropList() {
+    const base = relayUrl();
+    return drops.list().map(({ id, secret, label, createdAt, expiresAt, count, bytes }) => ({
+      id,
+      label,
+      createdAt,
+      expiresAt,
+      count,
+      bytes,
+      url: base ? `${base}/d/${self.id}#${id}.${secret}` : null,
+    }));
+  }
+
+  /** 받기 링크 만들기·끄기 (PC 화면에서만) */
+  async function dropsApi(req, res, url, ctx) {
+    if (!ctx.isHost) {
+      rejectBody(req, res);
+      return sendJson(res, 403, { error: 'PC 화면에서만 할 수 있어요.' });
+    }
+    if (!drops) {
+      rejectBody(req, res);
+      return sendJson(res, 404, { error: '받기 링크를 쓸 수 없어요.' });
+    }
+    if (url.pathname === '/api/drops' && req.method === 'GET') return sendJson(res, 200, { links: dropList() });
+    if (url.pathname === '/api/drops' && req.method === 'POST') {
+      if (!relayUrl()) {
+        rejectBody(req, res);
+        return sendJson(res, 409, { error: '먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요. 받기 링크는 중계 서버를 거쳐요.' });
+      }
+      let body;
+      try {
+        body = (await readJson(req, 4096)) ?? {};
+      } catch {
+        return sendJson(res, 413, { error: '잘못된 요청이에요.' });
+      }
+      let link;
+      try {
+        link = drops.create({ label: body.label, days: body.days });
+      } catch (err) {
+        return sendJson(res, err.status || 400, { error: err.message });
+      }
+      const list = dropList();
+      broadcastHost('drops', list);
+      return sendJson(res, 201, list.find((l) => l.id === link.id));
+    }
+    const m = /^\/api\/drops\/([0-9a-f]{16})$/.exec(url.pathname);
+    if (m && req.method === 'DELETE') {
+      rejectBody(req, res);
+      if (!drops.remove(m[1])) return sendJson(res, 404, { error: '이미 없는 링크예요.' });
+      broadcastHost('drops', dropList());
+      return sendEmpty(res);
+    }
+    rejectBody(req, res);
+    return sendJson(res, 404, { error: '없는 주소예요.' });
   }
 
   /** 새 버전 확인·업데이트 (PC 화면에서만) */

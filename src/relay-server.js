@@ -143,6 +143,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     }
     if ((m = /^\/p\/([0-9a-f]{16})\/?$/.exec(url.pathname))) return servePage(req, res, 'index.html', m[1]);
     if ((m = /^\/p\/([0-9a-f]{16})\/manifest\.webmanifest$/.exec(url.pathname))) return serveManifest(res, m[1]);
+    if ((m = /^\/d\/([0-9a-f]{16})\/?$/.exec(url.pathname))) return servePage(req, res, 'drop.html', m[1]);
     const name = url.pathname.slice(1);
     // 휴대폰 화면에 필요한 파일만 내준다 (HTML은 /p/<PC 번호>로만, 관리 화면 파일은 내주지 않는다)
     const ext = path.extname(name);
@@ -165,7 +166,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       body = Buffer.from(text);
     }
     const headers = { 'Content-Type': STATIC_TYPES[ext], 'Content-Length': body.length, 'Cache-Control': 'no-cache' };
-    if (name === 'index.html') {
+    if (name === 'index.html' || name === 'drop.html') {
       const host = String(req.headers.host || '').replace(/[^A-Za-z0-9.:-]/g, '');
       headers['Content-Security-Policy'] = [
         "default-src 'self'",

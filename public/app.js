@@ -153,6 +153,81 @@ async function waitForPc() {
   }
 }
 
+// ---- 받기 링크: 쏙이 없는 사람이 이 PC로 보낼 수 있는 링크 ----
+function setupDrops() {
+  if (!state.session.drops) return;
+  $('drops-card').hidden = false;
+  renderDrops();
+  $('drop-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const button = e.target.querySelector('button');
+    button.disabled = true;
+    try {
+      const link = await api('/api/drops', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: $('drop-label').value, days: Number($('drop-days').value) }),
+      });
+      $('drop-label').value = '';
+      await copyDropLink(link, true);
+    } catch (err) {
+      showError(err);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $('drops').addEventListener('click', async (e) => {
+    const row = e.target.closest('[data-drop]');
+    if (!row) return;
+    const link = state.session.drops.find((l) => l.id === row.dataset.drop);
+    if (!link) return;
+    if (e.target.closest('[data-copy]')) return copyDropLink(link);
+    if (e.target.closest('[data-off]')) {
+      if (!confirm(`‘${link.label}’ 받기 링크를 끌까요? 이 링크로는 더 보낼 수 없게 돼요.`)) return;
+      try {
+        await api(`/api/drops/${link.id}`, { method: 'DELETE' });
+        toast('받기 링크를 껐어요.');
+      } catch (err) {
+        showError(err);
+      }
+    }
+  });
+}
+
+async function copyDropLink(link, created = false) {
+  if (!link.url) return toast('어디서나(중계 서버)가 꺼져 있어 링크를 만들 수 없어요.', 'error');
+  try {
+    await navigator.clipboard.writeText(link.url);
+    toast(created ? `‘${link.label}’ 받기 링크를 만들고 복사했어요. 카카오톡 등으로 보내 주세요.` : '링크를 복사했어요.');
+  } catch {
+    prompt('이 링크를 복사해서 보내 주세요', link.url);
+  }
+}
+
+function renderDrops() {
+  const links = state.session.drops || [];
+  const relayOn = Boolean(state.session.relay?.url);
+  $('drops-off').hidden = relayOn;
+  $('drop-form').hidden = !relayOn;
+  $('drops').replaceChildren(
+    ...links.map((link) => {
+      const days = Math.max(1, Math.ceil((link.expiresAt - Date.now()) / 86_400_000));
+      const info = el('div', { class: 'drop-info' });
+      info.append(
+        el('div', { class: 'drop-name', title: link.label }, link.label),
+        el('div', { class: 'muted' }, `${days}일 남음${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
+      );
+      const row = el('li', { class: 'drop-row', 'data-drop': link.id });
+      row.append(
+        info,
+        el('button', { type: 'button', class: 'btn small', 'data-copy': '', disabled: !link.url }, '복사'),
+        el('button', { type: 'button', class: 'btn small ghost', 'data-off': '' }, '끄기'),
+      );
+      return row;
+    }),
+  );
+}
+
 function setupHost() {
   const { addresses, receivedDir, warnings = [] } = state.session;
   $('received-dir').textContent = receivedDir;
@@ -162,6 +237,7 @@ function setupHost() {
   }
   $('open-folder').addEventListener('click', () => post('/api/open-folder').catch(showError));
   setupSettings();
+  setupDrops();
 
   setupAnywhere();
   if (addresses.length) {
@@ -302,11 +378,25 @@ let reconnectTimer = null;
 
 /** 서버가 보내는 실시간 알림 처리 (집 Wi-Fi의 EventSource와 어디서나(중계) 모드가 같이 쓴다) */
 const EVENT_HANDLERS = {
+  drops: (links) => {
+    if (!state.session?.isHost) return;
+    state.session.drops = links;
+    renderDrops();
+  },
   relay: (info) => {
     if (!state.session?.isHost) return;
     state.session.relay = info;
     renderAnywhere();
     renderRelayStatus();
+    // 중계 서버 주소가 바뀌면 받기 링크 주소도 바뀐다
+    if (state.session.drops) {
+      api('/api/drops')
+        .then(({ links }) => {
+          state.session.drops = links;
+          renderDrops();
+        })
+        .catch(() => {});
+    }
   },
   'snapshot': (data) => {
     state.items = data.items;

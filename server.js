@@ -15,6 +15,7 @@ import { startDiscovery } from './src/discovery.js';
 import { loadIdentity } from './src/tls.js';
 import { encodeQR, toTerminal, toSvg } from './src/qr.js';
 import { startRelayClient } from './src/relay-client.js';
+import { DropBook } from './src/drops.js';
 import { runRelayHost, isRelayExe, RELAY_PORT, ADMIN_PORT } from './src/relay-host.js';
 import crypto from 'node:crypto';
 import { openPath, revealPath } from './src/open.js';
@@ -401,6 +402,7 @@ async function main() {
 
   const store = new Store(path.join(home, 'items.json')).load();
   const peerBook = new PeerBook(path.join(home, 'peers.json')).load();
+  const drops = new DropBook(path.join(home, 'drops.json')).load(); // 받기 링크
   const identity = loadIdentity(home, pcName); // 다른 PC·앱과 암호화해서 주고받을 때 쓰는 인증서
   await cleanup(outboxDir, receivedDir, store);
 
@@ -462,6 +464,11 @@ async function main() {
       relayKey,
       // 연결된 다른 PC가 집 밖에서 중계로 보낼 때: 그 PC와 나눠 가진 키로 통로를 열고, 그 키로 들어온 것으로 본다
       tunnelPorts,
+      // 받기 링크로 들어온 사람: 링크의 비밀 열쇠로 통로를 연다 (끈 링크는 바로 막힌다)
+      dropLookup: (id) => {
+        const link = drops.active(id);
+        return link ? { secret: Buffer.from(link.secret, 'hex') } : null;
+      },
       peerLookup: (id) => {
         const peer = peerBook.getPaired(id);
         return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
@@ -515,6 +522,7 @@ async function main() {
     relayUrl: () => (localOnly ? null : (config.relay?.url ?? null)),
     relayPairCode: () => (relayClient ? relayClient.requestPairCode() : Promise.reject(Object.assign(new Error('먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요.'), { status: 409 }))),
     tunnelPorts,
+    drops,
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self,

@@ -56,6 +56,22 @@
           </label>
         </section>
 
+        <section id="drops-card" class="card drops-card" hidden>
+          <h2>받기 링크</h2>
+          <p class="muted small">{{APP_NAME}}이 없는 사람도 이 링크를 열면 이 PC로 파일·텍스트를 보낼 수 있어요. 받은 목록은 볼 수 없어요.</p>
+          <p id="drops-off" class="muted small" hidden>[설정]에서 ‘어디서나 (중계 서버)’를 켜면 만들 수 있어요.</p>
+          <ul id="drops" class="drops"></ul>
+          <form id="drop-form" class="drop-form">
+            <input id="drop-label" type="text" placeholder="누구에게? 예: 민수" maxlength="40" autocomplete="off" aria-label="링크 이름">
+            <select id="drop-days" aria-label="쓸 수 있는 기간">
+              <option value="1">1일</option>
+              <option value="7" selected>7일</option>
+              <option value="30">30일</option>
+            </select>
+            <button class="btn small primary" type="submit">링크 만들기</button>
+          </form>
+        </section>
+
         <section class="card">
           <h2>받은 파일 폴더</h2>
           <p id="received-dir" class="path"></p>
