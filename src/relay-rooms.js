@@ -14,6 +14,9 @@ const ROOM_MS = 10 * 60_000; // 방 코드를 만들고 상대가 들어오기�
 const MAX_ROOMS = 200;
 const MAX_ROOMS_PER_ADDRESS = 5;
 const MAX_MEMBERS = 10; // 한 방에 들어올 수 있는 기기 수
+const PING_MS = 20_000; // 기기마다 이 간격으로 신호를 보낸다
+const SILENT_MS = 50_000; // 이만큼 아무 답이 없으면 끊긴 기기로 보고 내보낸다 (잠든 휴대폰, 닫힌 창 등)
+const STALL_MS = 30_000; // 한 기기에 보낼 것이 이만큼 밀려 있으면 그 기기를 내보낸다 (방 전체가 멈추지 않게)
 const MAX_WRONG = 10; // 암호·방 코드를 이만큼 틀리면 그 주소는 잠시 막는다
 const WRONG_WINDOW_MS = 10 * 60_000;
 const MAX_WRONG_ALL = 300; // 여러 주소에서 몰려와도: 10분 동안 전체로 이만큼 틀리면 잠시 모두 막는다
@@ -38,8 +41,10 @@ function parseCookies(header = '') {
  * @param {() => void} options.save
  * @param {(req) => string} options.clientAddress
  * @param {(type: string, payload?: any) => void} [options.log]
+ * @param {{pingMs?: number, silentMs?: number, stallMs?: number}} [options.timing]  시험에서 짧게 줄일 때
  */
-export function createRoomService({ state, save, clientAddress, log = () => {} }) {
+export function createRoomService({ state, save, clientAddress, log = () => {}, timing = {} }) {
+  const { pingMs = PING_MS, silentMs = SILENT_MS, stallMs = STALL_MS } = timing;
   state.web ??= { pin: null, version: 1, bytes: 0 };
   state.web.key ??= crypto.randomBytes(32).toString('hex'); // 브라우저에 주는 입장권의 서명 열쇠
 
@@ -201,11 +206,22 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
   }
 
   function addMember(room, ws, device, e) {
-    const member = { id: room.nextId++, ws, device, e };
+    const member = { id: room.nextId++, ws, device, e, heard: Date.now(), stall: null };
     room.members.set(member.id, member);
     live.add(ws);
     let unsaved = 0;
+    // 말없이 끊긴 기기(잠든 휴대폰 등)는 신호에 답하지 않는다: 내보내야 인원 수가 맞고 다른 기기가 기다리지 않는다
+    const heartbeat = setInterval(() => {
+      if (Date.now() - member.heard > silentMs) {
+        log('room', `홈페이지 방: ${member.device} 응답이 없어 내보냄`);
+        return ws.close(4008, 'silent');
+      }
+      ws.ping();
+    }, pingMs);
+    heartbeat.unref?.();
+    ws.on('pong', () => (member.heard = Date.now()));
     ws.on('message', (data, binary) => {
+      member.heard = Date.now();
       if (!binary) {
         // 방 열쇠 건네기 등: 그 기기에게만 전한다 (보낸 기기 번호는 중계 서버가 붙인다)
         let msg;
@@ -213,6 +229,17 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
           msg = data.length < 4096 ? JSON.parse(data.toString('utf8')) : null;
         } catch {
           msg = null;
+        }
+        if (msg?.t === 'skip') {
+          // 이 기기가 '모두'에게 보낼 때 뺄 기기들: 받지 못하고 멈춘 기기 하나 때문에 다른 기기까지 기다리지 않게 (빈 목록이면 다시 모두)
+          member.skip = new Set((Array.isArray(msg.ids) ? msg.ids : []).slice(0, MAX_MEMBERS).map(Number));
+          return;
+        }
+        if (msg?.t === 'rename') {
+          // 방에서 보일 이름 바꾸기
+          member.device = String(msg.device || '').trim().slice(0, 40) || member.device;
+          for (const m of room.members.values()) if (m !== member) m.ws.sendJson({ t: 'member-rename', id: member.id, device: member.device });
+          return;
         }
         const target = msg?.t === 'signal' ? room.members.get(Number(msg.to)) : null;
         if (target && target !== member) target.ws.sendJson({ t: 'signal', from: member.id, data: msg.data });
@@ -223,15 +250,29 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
       const to = data.readUInt16BE(0);
       const out = Buffer.from(data);
       out.writeUInt16BE(member.id, 0);
-      const targets = to === 0 ? [...room.members.values()].filter((m) => m !== member) : [room.members.get(to)].filter((m) => m && m !== member);
+      const targets = to === 0 ? [...room.members.values()].filter((m) => m !== member && !member.skip?.has(m.id)) : [room.members.get(to)].filter((m) => m && m !== member);
       let waiting = 0;
       for (const target of targets) {
+        if (target.ws.closed) continue; // 닫힌 기기는 곧 방에서 빠진다 (기다리면 다시 풀리지 않는다)
         state.web.bytes = (state.web.bytes || 0) + out.length;
         unsaved += out.length;
         if (!target.ws.send(out)) {
           // 받는 쪽이 느리면 보내는 쪽을 잠깐 멈춘다 (이 서버 메모리에 쌓이지 않게). 가장 느린 기기에 맞춘다.
+          // 다만 한 기기가 오래 막혀 있으면 그 기기를 내보낸다 (끊긴 기기 하나 때문에 방 전체가 멈추지 않게).
           waiting++;
-          target.ws.once('drain', () => --waiting === 0 && ws.resume());
+          const resumeOnce = () => {
+            target.ws.off('drain', resumeOnce);
+            target.ws.off('close', resumeOnce);
+            clearTimeout(target.stall);
+            target.stall = null;
+            if (--waiting === 0) ws.resume();
+          };
+          target.ws.on('drain', resumeOnce);
+          target.ws.on('close', resumeOnce);
+          target.stall ??= setTimeout(() => {
+            log('room', `홈페이지 방: ${target.device} 받는 것이 오래 막혀 내보냄`);
+            target.ws.close(4008, 'stalled');
+          }, stallMs);
         }
       }
       if (waiting) ws.pause();
@@ -241,6 +282,8 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
       }
     });
     ws.on('close', () => {
+      clearInterval(heartbeat);
+      clearTimeout(member.stall);
       live.delete(ws);
       if (room.members.get(member.id) !== member) return;
       room.members.delete(member.id);

@@ -11,7 +11,7 @@ const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hos
 let peer = null;
 let target = 0; // 0 = 모두, 아니면 그 기기 번호
 let nextId = 1;
-const outgoing = new Map(); // 보내는 중: 번호 → { abort, view, update, expected, done }
+const outgoing = new Map(); // 보내는 중: 번호 → { abort, view, update, size, to, acked: 받을 기기 → 받은 양, heard: 받을 기기 → 마지막 소식, done }
 const incoming = new Map(); // 받는 중: '보낸 기기:번호' → { name, size, type, chunks, received, view, update, from }
 let sending = Promise.resolve(); // 보낼 파일은 하나씩 차례로
 
@@ -86,6 +86,25 @@ function displayNames() {
   return names;
 }
 const nameOf = (id) => displayNames().get(id) ?? '나간 기기';
+
+/** 방에서 보일 내 이름 (이 브라우저에 기억) */
+const NAME_KEY = 'ssok.roomName';
+function myName() {
+  let saved = '';
+  try {
+    saved = localStorage.getItem(NAME_KEY) || '';
+  } catch {
+    saved = '';
+  }
+  return saved.trim().slice(0, 40) || deviceName();
+}
+function saveName(name) {
+  try {
+    localStorage.setItem(NAME_KEY, name);
+  } catch {
+    // 저장하지 못하면 다음에 다시 정한다
+  }
+}
 const others = () => (peer ? peer.memberList().filter((m) => !m.me).map((m) => ({ ...m, device: nameOf(m.id) })) : []);
 
 function notice(title, text) {
@@ -120,8 +139,11 @@ async function start() {
 }
 
 function goHome() {
+  opening++;
   closeRoom();
   show('home-view');
+  $('my-name').value = myName() === deviceName() ? '' : myName();
+  $('my-name').placeholder = `예: 민수 노트북 (비우면 ‘${deviceName()}’)`;
   setStatus('waiting', '준비됨');
   // QR로 들어왔으면 (주소 끝 #123456) 바로 그 방에 들어간다
   const code = /^#(\d{6})$/.exec(location.hash)?.[1];
@@ -165,23 +187,45 @@ function closeRoom() {
   $('invite-box').hidden = true;
 }
 
+let opening = 0; // 방을 여는 차례: 여는 사이 첫 화면으로 돌아가면 열린 연결은 닫는다
+let busy = false; // 방을 여는 중 (코드를 다 치자마자 저절로 들어가는데 [들어가기]도 누르면 두 번 들어가지 않게)
 async function openRoom(options) {
+  if (busy) return;
+  busy = true;
+  try {
+    await openRoomOnce(options);
+  } finally {
+    busy = false;
+  }
+}
+async function openRoomOnce(options) {
+  if ($('my-name').value.trim()) saveName($('my-name').value.trim());
+  else saveName('');
+  const turn = ++opening;
   closeRoom();
+  for (const id of ['create', 'join-code']) $(id).disabled = true;
   setStatus('connecting', options.create ? '방을 만드는 중…' : '들어가는 중…');
   let room;
   try {
-    room = await RoomPeer.open(wsUrl, { ...options, device: deviceName() });
+    room = await RoomPeer.open(wsUrl, { ...options, device: myName() });
   } catch (err) {
+    for (const id of ['create', 'join-code']) $(id).disabled = false;
+    if (turn !== opening) return;
     if (err.code === 'CONNECT' || err.code === 'CLOSED') return notice('연결하지 못했어요', '암호가 바뀌었을 수 있어요. 새로 고쳐 다시 해 주세요.');
     return notice(err.code === 'no-room' ? '방을 찾지 못했어요' : '방에 들어가지 못했어요', err.message);
   }
+  for (const id of ['create', 'join-code']) $(id).disabled = false;
+  if (turn !== opening) return room.close(); // 그사이 다른 방을 열었으면 이 연결은 닫는다
   peer = room;
   room.onMembers = (list, change) => {
     if (peer !== room) return;
     if (change?.joined) toast(`${nameOf(change.joined.id)}이(가) 들어왔어요.`);
+    if (change?.renamed) toast(`${change.renamed.from} → ${change.renamed.to}(으)로 이름을 바꿨어요.`);
     if (change?.left) {
       toast(`${change.left.device}이(가) 나갔어요.`);
       if (target === change.left.id) target = 0;
+      // 그 기기에 보내던 파일은 그 기기를 빼고 마저 센다
+      for (const job of outgoing.values()) job.forget?.(change.left.id);
       for (const [key, entry] of incoming) {
         if (entry.from === change.left.id) {
           incoming.delete(key);
@@ -217,6 +261,7 @@ function renderRoom() {
   }
   show('session-view');
   $('peer-name').textContent = list.length ? `방 · ${list.length + 1}대` : '방 · 다른 기기를 기다리는 중';
+  $('me-line').textContent = `나: ${peer.device} · 함께: ${list.map((m) => m.device).join(', ') || '아직 없음'}`;
   $('key-wait').hidden = peer.ready;
   setStatus(peer.ready ? 'online' : 'connecting', peer.ready ? `${list.length + 1}대 연결됨` : '방 열쇠 받는 중…');
   const chips = [chip(0, '모두')].concat(list.map((m) => chip(m.id, m.device)));
@@ -255,6 +300,12 @@ $('join-code').addEventListener('input', () => {
 });
 $('wait-cancel').addEventListener('click', goHome);
 $('invite').addEventListener('click', () => ($('invite-box').hidden = !$('invite-box').hidden));
+$('rename').addEventListener('click', () => {
+  const name = prompt('이 방에서 보일 내 이름', peer?.device ?? myName());
+  if (!name?.trim() || !peer) return;
+  saveName(name.trim());
+  peer.rename(name.trim());
+});
 $('leave').addEventListener('click', () => {
   if (incoming.size && !confirm('받는 중인 파일이 있어요. 그래도 나갈까요?')) return;
   goHome();
@@ -286,46 +337,141 @@ function progressBar(row) {
 }
 
 // ---- 보내기 ----
+// 받는 기기들이 받은 만큼 알려 준다(FILE_PROGRESS). 진행률은 '상대가 실제로 받은 양'으로 보여 주고,
+// 가장 느린 기기보다 WINDOW 이상 앞서 보내지 않는다 (중간에 쌓여 '보냄'이 먼저 뜨고 한참 기다리는 일이 없게).
+const WINDOW = 8 * 1024 * 1024;
+const STUCK_MS = 15_000; // 이만큼 아무 소식 없이 뒤처진 기기는 빼고 마저 보낸다 (잠든 휴대폰, 방 열쇠를 아직 못 받은 기기 등)
+const LATE_MS = 4000; // 이만큼 소식이 없으면 '○○ 기다리는 중'으로 알린다
+const skipping = new Set(); // 지금 보내는 파일에서 뺀 기기들 (중계 서버도 그 기기에는 보내지 않는다)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function sendFiles(files) {
   if (!peer?.ready) return toast('방 열쇠를 받은 뒤에 보낼 수 있어요.', 'error');
   if (!others().length) return toast('아직 방에 다른 기기가 없어요. [더 초대]로 코드를 알려 주세요.', 'error');
   for (const file of files) {
     const id = nextId++;
     const to = target;
-    const expected = to === 0 ? others().length : 1;
     const view = addRow('out', 'i-file', file.name || '파일', to === 0 ? '모두' : nameOf(to));
     view.dir.textContent = `${formatSize(file.size)} · 기다리는 중`;
-    const job = { abort: false, view, update: progressBar(view.row), expected, done: 0 };
+    const job = { abort: false, view, update: progressBar(view.row), size: file.size, to, acked: new Map(), heard: new Map(), done: new Set() };
     outgoing.set(id, job);
-    sending = sending.then(() => sendOne(id, to, file, job)).catch(() => {});
+    sending = sending.then(() => sendOne(id, file, job)).catch(() => {});
   }
 }
 
-async function sendOne(id, to, file, job) {
+/** 받는 기기 중 가장 덜 받은 양 (받을 기기가 없으면 null) */
+function slowest(job) {
+  const left = [...job.acked.entries()].filter(([who]) => !job.done.has(who));
+  if (!job.acked.size) return null;
+  return left.length ? Math.min(...left.map(([, n]) => n)) : job.size;
+}
+
+function showSendProgress(job) {
+  const got = slowest(job) ?? 0;
+  job.update(got, job.size);
+  const seconds = Math.max(0.5, (Date.now() - (job.startedAt || Date.now())) / 1000);
+  const speed = got / seconds;
+  const many = job.acked.size > 1 ? ` · ${job.done.size}/${job.acked.size}대 다 받음` : '';
+  // 기다리게 하는 기기: 한참 뒤처졌거나(그 기기 때문에 더 못 보냄), 다 보낸 뒤 '다 받음' 소식이 없는 기기
+  const late = [...job.acked].filter(
+    ([who, n]) => !job.done.has(who) && Date.now() - job.heard.get(who) > LATE_MS && (job.ended || (job.sent ?? 0) - n > WINDOW),
+  );
+  const wait = late.length ? ` · ${late.map(([who]) => nameOf(who)).join(', ')} 기다리는 중` : '';
+  job.view.dir.textContent = `${formatSize(got)} / ${formatSize(job.size)} · ${formatSize(speed)}/s${many}${wait}`;
+}
+
+async function sendOne(id, file, job) {
   const room = peer;
   if (!room || job.abort) return;
+  // 보내기 시작할 때 방에 있는 받을 기기들
+  const recipients = job.to === 0 ? others().map((m) => m.id) : [job.to];
+  job.startedAt = Date.now();
+  for (const who of recipients) {
+    job.acked.set(who, 0);
+    job.heard.set(who, job.startedAt);
+  }
+  job.forget = (who) => {
+    if (!job.acked.delete(who)) return;
+    job.done.delete(who);
+    if (job.acked.size) return finishIfDone(id, job);
+    // 받을 기기가 모두 나갔다: 보내는 중이면 아래 고리에서 멈추고, 다 보낸 뒤면 여기서 끝낸다
+    if (job.ended) {
+      outgoing.delete(id);
+      job.view.dir.textContent = '받을 기기가 모두 나갔어요';
+      job.view.row.querySelector('.bar')?.remove();
+    }
+  };
+  job.sent = 0;
   try {
-    await room.send(to, FRAME.FILE_HEAD, id, { name: file.name || '파일', size: file.size, type: file.type || '', lastModified: file.lastModified || 0 });
-    let done = 0;
-    while (done < file.size) {
-      if (job.abort || peer !== room) {
-        await room.send(to, FRAME.FILE_CANCEL, id, {}).catch(() => {});
-        job.view.dir.textContent = '취소됨';
+    await room.send(job.to, FRAME.FILE_HEAD, id, { name: file.name || '파일', size: file.size, type: file.type || '', lastModified: file.lastModified || 0 });
+    let sent = 0;
+    while (sent < file.size) {
+      if (job.abort || peer !== room || !job.acked.size) {
+        await room.send(job.to, FRAME.FILE_CANCEL, id, {}).catch(() => {});
+        job.view.dir.textContent = job.acked.size ? '취소됨' : '받을 기기가 모두 나갔어요';
+        outgoing.delete(id);
         return;
       }
-      const piece = new Uint8Array(await file.slice(done, done + CHUNK).arrayBuffer());
-      await room.send(to, FRAME.FILE_DATA, id, piece);
+      // 가장 느린 기기가 따라올 때까지 기다린다. 오래 소식이 없는 기기는 빼고 마저 보낸다.
+      if (sent - (slowest(job) ?? sent) > WINDOW) {
+        for (const [who, n] of job.acked) {
+          if (sent - n > WINDOW && Date.now() - job.heard.get(who) > STUCK_MS) {
+            toast(`${nameOf(who)}이(가) 받지 못하고 있어서 빼고 보내요.`, 'error');
+            job.forget(who);
+            // '모두'에게 보내는 중이면 중계 서버도 그 기기에는 그만 보낸다 (그 기기가 막혀 있으면 중계 서버가 보내는 쪽까지 멈추므로)
+            if (job.to === 0) {
+              skipping.add(who);
+              await room.skip(skipping);
+            }
+          }
+        }
+        if (Date.now() - (job.shown || 0) > 500) {
+          job.shown = Date.now();
+          showSendProgress(job);
+        }
+        await sleep(40);
+        continue;
+      }
+      const piece = new Uint8Array(await file.slice(sent, sent + CHUNK).arrayBuffer());
+      await room.send(job.to, FRAME.FILE_DATA, id, piece);
       await room.drain();
-      done += piece.length;
-      job.update(done, file.size);
-      job.view.dir.textContent = `${formatSize(done)} / ${formatSize(file.size)}`;
+      sent += piece.length;
+      job.sent = sent;
+      showSendProgress(job);
     }
-    await room.send(to, FRAME.FILE_END, id, {});
-    job.view.dir.textContent = `${formatSize(file.size)} · 보냄 (받는 중)`;
+    await room.send(job.to, FRAME.FILE_END, id, {});
+    job.ended = true;
+    if (outgoing.has(id)) showSendProgress(job);
+    // 다 보낸 뒤에도 오래 소식이 없는 기기는 빼고 끝낸다 (다음 파일은 기다리지 않고 바로 보낸다)
+    const watch = setInterval(() => {
+      if (!outgoing.has(id) || peer !== room) return clearInterval(watch);
+      for (const who of [...job.acked.keys()]) {
+        if (!job.done.has(who) && Date.now() - job.heard.get(who) > STUCK_MS) {
+          toast(`${nameOf(who)}에서 받았다는 소식이 없어요.`, 'error');
+          job.forget(who);
+        }
+      }
+      if (outgoing.has(id)) showSendProgress(job);
+    }, 1000);
   } catch {
     job.view.dir.textContent = '보내지 못함';
     outgoing.delete(id);
+  } finally {
+    // 이 파일을 다 보냈으니 다음 것은 다시 모두에게
+    if (skipping.size) {
+      skipping.clear();
+      room.skip([]).catch(() => {});
+    }
   }
+}
+
+/** 받을 기기가 모두 다 받았으면 끝 표시 */
+function finishIfDone(id, job) {
+  if (!job.acked.size || job.done.size < job.acked.size) return;
+  outgoing.delete(id);
+  job.update(job.size, job.size);
+  job.view.dir.textContent = job.acked.size > 1 ? `${job.acked.size}대 모두 받았어요 ✓` : '받았어요 ✓';
+  job.view.row.querySelector('.bar')?.remove();
 }
 
 async function sendText(text) {
@@ -360,6 +506,11 @@ function onFrame(from, type, id, payload) {
     if (!entry) return;
     entry.chunks.push(payload.slice());
     entry.received += payload.length;
+    // 보낸 기기에 받은 만큼 알린다 (512KB마다): 그 기기의 진행률과 보내는 속도 조절에 쓴다
+    if (entry.received - (entry.reported || 0) >= 512 * 1024) {
+      entry.reported = entry.received;
+      peer?.send(from, FRAME.FILE_PROGRESS, id, { n: entry.received }).catch(() => {});
+    }
     entry.update(entry.received, entry.size);
     entry.view.dir.textContent = `${formatSize(entry.received)} / ${formatSize(entry.size)}`;
   } else if (type === FRAME.FILE_END) {
@@ -373,16 +524,19 @@ function onFrame(from, type, id, payload) {
     if (!entry) return;
     incoming.delete(key);
     entry.view.dir.textContent = '보낸 기기가 취소함';
+  } else if (type === FRAME.FILE_PROGRESS) {
+    const job = outgoing.get(id);
+    if (!job || !job.acked.has(from)) return;
+    job.acked.set(from, Math.max(job.acked.get(from), Number(decodeJson(payload).n) || 0));
+    job.heard.set(from, Date.now());
+    showSendProgress(job);
   } else if (type === FRAME.FILE_DONE) {
     const job = outgoing.get(id);
-    if (!job) return;
-    job.done += 1;
-    job.view.dir.textContent = job.expected > 1 ? `${job.done}/${job.expected}대 받음` : '받았어요 ✓';
-    if (job.done >= job.expected) {
-      outgoing.delete(id);
-      job.view.dir.textContent = job.expected > 1 ? `${job.expected}대 모두 받았어요 ✓` : '받았어요 ✓';
-      job.view.row.querySelector('.bar')?.remove();
-    }
+    if (!job || !job.acked.has(from)) return;
+    job.acked.set(from, job.size);
+    job.done.add(from);
+    showSendProgress(job);
+    finishIfDone(id, job);
   } else if (type === FRAME.TEXT) {
     const text = String(decodeJson(payload).text ?? '');
     const view = addRow('in', 'i-text', text, nameOf(from));

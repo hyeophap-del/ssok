@@ -128,12 +128,24 @@ export class RoomPeer {
       this.onMembers?.(this.memberList(), { joined: msg });
       // 방 열쇠를 가진 기기는 새 기기에게 건넨다 (여럿이 건네도 새 기기는 처음 것을 쓴다)
       if (this.roomKey && /^04[0-9a-f]{128}$/i.test(msg.e || '')) {
-        const salt = randomBytes(16);
-        const wrap = await wrapKeyFor(this.pair, msg.e, salt);
-        const iv = randomBytes(12);
-        const wrapped = new Uint8Array(await subtle().encrypt({ name: 'AES-GCM', iv }, wrap, this.roomKeyRaw));
-        this.ws.send(JSON.stringify({ t: 'signal', to: msg.id, data: { k: toHex(wrapped), iv: toHex(iv), salt: toHex(salt) } }));
+        try {
+          const salt = randomBytes(16);
+          const wrap = await wrapKeyFor(this.pair, msg.e, salt);
+          const iv = randomBytes(12);
+          const wrapped = new Uint8Array(await subtle().encrypt({ name: 'AES-GCM', iv }, wrap, this.roomKeyRaw));
+          this.ws.send(JSON.stringify({ t: 'signal', to: msg.id, data: { k: toHex(wrapped), iv: toHex(iv), salt: toHex(salt) } }));
+        } catch {
+          // 공개 열쇠가 잘못된 기기에게는 건네지 않는다 (그 기기 하나 때문에 내 연결이 끊기지 않게)
+        }
       }
+      return;
+    }
+    if (msg.t === 'member-rename') {
+      const member = this.members.get(msg.id);
+      if (!member) return;
+      const before = member.device;
+      member.device = msg.device;
+      this.onMembers?.(this.memberList(), { renamed: { id: msg.id, from: before, to: msg.device } });
       return;
     }
     if (msg.t === 'member-leave') {
@@ -155,6 +167,26 @@ export class RoomPeer {
         // 풀리지 않으면 다른 기기가 건넨 것을 기다린다
       }
     }
+  }
+
+  /** 방에서 보일 내 이름을 바꾼다 (다른 기기에도 바로 알린다) */
+  rename(device) {
+    const name = String(device || '').trim().slice(0, 40);
+    if (!name || this.closed) return;
+    this.device = name;
+    const me = this.members.get(this.you);
+    if (me) me.device = name;
+    this.ws.send(JSON.stringify({ t: 'rename', device: name }));
+    this.onMembers?.(this.memberList());
+  }
+
+  /** '모두'(0)에게 보낼 때 뺄 기기들 (빈 목록이면 다시 모두). 앞뒤 메시지와 순서가 섞이지 않게 같은 줄에 선다. */
+  skip(ids) {
+    const run = async () => {
+      if (!this.closed) this.ws.send(JSON.stringify({ t: 'skip', ids: [...ids] }));
+    };
+    this.outbox = this.outbox.then(run, run);
+    return this.outbox;
   }
 
   memberList() {

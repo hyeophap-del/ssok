@@ -29,6 +29,7 @@ export const FRAME = {
   FILE_CANCEL: 23,
   FILE_DONE: 24, // 받는 쪽 → 보낸 쪽: 다 받았어요
   TEXT: 25, // { text }
+  FILE_PROGRESS: 26, // 받는 쪽 → 보낸 쪽: { n: 지금까지 받은 바이트 } (보낸 쪽 진행률과 보내는 속도 조절에 쓴다)
 };
 
 export const CHUNK = 64 * 1024;

@@ -35,6 +35,13 @@
     @media (pointer: fine) { .session-main .pick-buttons { display: none; } }
     .peer-line { display: flex; align-items: center; gap: 8px; }
     .peer-line strong { flex: 1; min-width: 0; }
+    .name-field { display: grid; gap: 6px; text-align: left; font-size: 13px; font-weight: 600; }
+    .name-field input {
+      min-height: 44px; padding: 8px 12px; border-radius: 12px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--text); font: inherit; font-size: 15px; font-weight: 400;
+    }
+    .name-field input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+    .me-line { font-size: 13px; color: var(--muted); margin: -6px 0 0; }
     .list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
     .xfer { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; }
     .xfer-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -76,6 +83,9 @@
         <p class="muted small">기기마다 이 홈페이지를 열고 같은 방에 들어오면 파일·사진·텍스트를 주고받을 수 있어요 (한 방에 10대까지). 방에 들어온 기기 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
       </div>
       <div class="card center-card" style="margin-top: 16px">
+        <label class="name-field">내 이름 <span class="muted small">다른 기기에 이렇게 보여요</span>
+          <input id="my-name" type="text" maxlength="40" autocomplete="off" placeholder="예: 민수 노트북">
+        </label>
         <button id="create" class="btn primary" type="button" style="min-height: 52px; font-size: 16px">새로 시작하기 (방 코드 만들기)</button>
         <div class="or">또는</div>
         <form id="join-form" style="display: grid; gap: 10px">
@@ -100,6 +110,7 @@
       <div class="card session-main">
         <div class="peer-line">
           <strong id="peer-name">방</strong>
+          <button id="rename" class="btn small ghost" type="button" title="이 방에서 보일 내 이름 바꾸기">이름</button>
           <button id="invite" class="btn small" type="button">더 초대</button>
           <button id="leave" class="btn small ghost" type="button">나가기</button>
         </div>
@@ -108,6 +119,7 @@
           <div id="invite-qr" class="room-qr" style="width: 160px"></div>
           <p class="muted small">다른 기기에서 <b id="invite-host"></b>에 들어가 이 코드를 넣거나 QR을 찍으면 이 방에 들어와요.</p>
         </div>
+        <p id="me-line" class="me-line"></p>
         <div class="targets">
           <span class="targets-label">보낼 곳</span>
           <div id="targets" class="chips" role="group" aria-label="보낼 곳"></div>

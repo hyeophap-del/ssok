@@ -126,8 +126,9 @@ export function newInviteCode() {
  * @param {string} options.publicDir   휴대폰 화면 파일 (쏙의 public/)
  * @param {string} options.version
  * @param {(type: string, payload?: any) => void} [options.log]
+ * @param {object} [options.roomTiming]  홈페이지 방의 신호 간격 (시험용)
  */
-export function createRelayServer({ dataDir, publicDir, version, log = () => {} }) {
+export function createRelayServer({ dataDir, publicDir, version, log = () => {}, roomTiming }) {
   const stateFile = path.join(dataDir, 'relay.json');
   let state = { invites: [], pcs: {}, links: {} }; // links: 링크 이름 → { pcId, linkId }
   try {
@@ -174,7 +175,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
   }
 
   // 홈페이지에서 바로 주고받기 (설치 없이 브라우저끼리, 주인이 정한 4자리 암호로)
-  const rooms = createRoomService({ state, save, clientAddress, log });
+  const rooms = createRoomService({ state, save, clientAddress, log, timing: roomTiming });
 
   // ---- 웹 페이지 ----
 

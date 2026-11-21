@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createRelayServer } from '../src/relay-server.js';
 import { WsConnection } from '../src/ws.js';
@@ -160,4 +162,120 @@ test('한 방에는 10대까지 들어온다', async () => {
   for (let i = 2; i <= 10; i++) peers.push(await enter(cookie, { code: peers[0].code, device: `${i}번` }));
   await assert.rejects(enter(cookie, { code: peers[0].code, device: '11번' }), (err) => err.code === 'full');
   for (const p of peers) p.close();
+});
+
+test('방에서 보일 이름을 바꾸면 다른 기기에도 바로 바뀐다', async () => {
+  const cookie = (await login('5932')).headers.get('set-cookie').split(';')[0];
+  const a = await member(cookie, { create: true, device: 'Windows PC' });
+  const b = await member(cookie, { code: a.code, device: 'Windows PC' });
+  await b.keyed;
+  a.rename('  민수 노트북  ');
+  await waitFor(() => b.changes.some((c) => c.renamed));
+  assert.deepEqual(b.changes.find((c) => c.renamed).renamed, { id: a.you, from: 'Windows PC', to: '민수 노트북' });
+  assert.deepEqual(b.memberList().map((m) => m.device), ['민수 노트북', 'Windows PC']);
+  assert.equal(a.memberList().find((m) => m.me).device, '민수 노트북');
+  for (const p of [a, b]) p.close();
+});
+
+/** 웹소켓 약속을 손으로 따르는 기기: 신호(ping)에 답하지 않고, 원하면 받기도 멈춘다 (잠든 휴대폰·닫힌 창 흉내) */
+async function rawMember(server, cookie, first) {
+  const { port } = server.address();
+  const socket = net.connect(port, '127.0.0.1');
+  await once(socket, 'connect');
+  socket.write(
+    `GET /ws/room HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+      `Sec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\nCookie: ${cookie}\r\n\r\n`,
+  );
+  let head = Buffer.alloc(0);
+  while (!head.includes('\r\n\r\n')) head = Buffer.concat([head, (await once(socket, 'data'))[0]]);
+  assert.match(head.toString(), /^HTTP\/1\.1 101/);
+  const body = Buffer.from(JSON.stringify(first));
+  const mask = crypto.randomBytes(4);
+  const header = body.length < 126 ? Buffer.from([0x81, 0x80 | body.length]) : Buffer.from([0x81, 0x80 | 126, body.length >> 8, body.length & 255]);
+  socket.write(Buffer.concat([header, mask, Buffer.from(body.map((byte, i) => byte ^ mask[i % 4]))]));
+  return socket;
+}
+const publicKeyHex = () => crypto.createECDH('prime256v1').generateKeys('hex');
+
+test('답이 없거나 받지 못하고 막힌 기기는 방에서 빠지고, 나머지 기기는 계속 주고받는다', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssok-room-timing-'));
+  const logs = [];
+  const quick = createRelayServer({
+    dataDir: dir,
+    publicDir: path.join(ROOT, 'public'),
+    version: 'test',
+    log: (type, text) => logs.push(String(text)),
+    roomTiming: { pingMs: 100, silentMs: 700, stallMs: 300 },
+  });
+  await new Promise((r) => quick.server.listen(0, '127.0.0.1', r));
+  const quickBase = `http://127.0.0.1:${quick.server.address().port}`;
+  quick.setWebPin('7310');
+  const res = await fetch(`${quickBase}/api/web/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '7310' }) });
+  const cookie = res.headers.get('set-cookie').split(';')[0];
+  const url = `${quickBase.replace('http', 'ws')}/ws/room`;
+  const open = async (options) => {
+    const peer = await RoomPeer.open(url, { ...options, headers: { cookie } });
+    peer.changes = [];
+    peer.onMembers = (list, change) => change && peer.changes.push(change);
+    return peer;
+  };
+  try {
+    const pc = await open({ create: true, device: 'PC' });
+    const phone = await open({ code: pc.code, device: '휴대폰' });
+    await phone.keyed;
+
+    // 1) 말없이 끊긴 기기 (신호에 답하지 않음): 잠시 뒤 빠져서 인원 수가 맞는다
+    const sleepy = await rawMember(quick.server, cookie, { t: 'join', code: pc.code, device: '잠든 폰', e: publicKeyHex() });
+    sleepy.resume();
+    await waitFor(() => pc.members.size === 3);
+    await waitFor(() => pc.changes.some((c) => c.left?.device === '잠든 폰'), 4000);
+    assert.equal(pc.members.size, 2);
+    assert.ok(logs.some((l) => l.includes('잠든 폰') && l.includes('응답이 없어')));
+    sleepy.destroy();
+
+    // 2) 받지 못하고 막힌 기기: 그 기기 때문에 다른 기기에 보내는 것이 멈추지 않는다
+    const stuck = await rawMember(quick.server, cookie, { t: 'join', code: pc.code, device: '막힌 창', e: publicKeyHex() });
+    await waitFor(() => pc.members.size === 3);
+    stuck.pause();
+    let received = 0;
+    phone.onFrame = (from, type, id, payload) => type === FRAME.FILE_DATA && (received += payload.length);
+    const chunk = crypto.randomBytes(64 * 1024);
+    const total = 24 * 1024 * 1024;
+    for (let sent = 0; sent < total; sent += chunk.length) {
+      await pc.send(0, FRAME.FILE_DATA, 1, chunk);
+      await pc.drain();
+    }
+    await waitFor(() => received === total, 8000);
+    await waitFor(() => pc.changes.some((c) => c.left?.device === '막힌 창'));
+    assert.equal(pc.members.size, 2);
+    assert.ok(logs.some((l) => l.includes('막힌 창') && l.includes('오래 막혀')), '받지 못하고 막혀서 빠졌다');
+    stuck.destroy();
+
+    // 받는 쪽이 받은 만큼 알리는 메시지(FILE_PROGRESS)도 그대로 전해진다
+    let progress = null;
+    pc.onFrame = (from, type, id, payload) => type === FRAME.FILE_PROGRESS && (progress = { from, id, n: JSON.parse(new TextDecoder().decode(payload)).n });
+    await phone.send(pc.you, FRAME.FILE_PROGRESS, 1, { n: total });
+    await waitFor(() => progress);
+    assert.deepEqual(progress, { from: phone.you, id: 1, n: total });
+    for (const p of [pc, phone]) p.close();
+  } finally {
+    await quick.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("'모두'에게 보낼 때 받지 못하는 기기를 뺄 수 있고, 빈 목록이면 다시 모두에게 간다", async () => {
+  const cookie = (await login('5932')).headers.get('set-cookie').split(';')[0];
+  const a = await member(cookie, { create: true, device: 'PC' });
+  const b = await member(cookie, { code: a.code, device: '아이폰' });
+  const c = await member(cookie, { code: a.code, device: '갤럭시' });
+  await Promise.all([b.keyed, c.keyed]);
+  await a.skip(new Set([c.you]));
+  await a.send(0, FRAME.TEXT, 1, { text: '갤럭시 빼고' });
+  await a.skip([]);
+  await a.send(0, FRAME.TEXT, 2, { text: '다시 모두' });
+  await waitFor(() => textsOf(b).length === 2 && textsOf(c).length === 1);
+  assert.deepEqual(textsOf(b), ['갤럭시 빼고', '다시 모두']);
+  assert.deepEqual(textsOf(c), ['다시 모두']);
+  for (const p of [a, b, c]) p.close();
 });
