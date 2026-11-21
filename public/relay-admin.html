@@ -112,6 +112,18 @@
       <p id="howto" class="howto" hidden></p>
     </section>
 
+    <section class="card" aria-labelledby="web-title">
+      <h2 id="web-title">홈페이지에서 바로 주고받기</h2>
+      <p class="lead">설치 없이 두 기기가 <b id="web-host">이 중계 서버 주소</b>에 들어와 방 코드로 주고받아요. 들어오려면 여기서 정한 숫자 4자리 암호를 넣어야 해요.</p>
+      <p id="web-state" class="facts"></p>
+      <form id="web-form" class="field-row">
+        <input id="web-pin" type="text" inputmode="numeric" maxlength="4" placeholder="암호 숫자 4자리" autocomplete="off" aria-label="홈페이지 암호">
+        <button class="btn primary" type="submit">암호 정하기</button>
+        <button id="web-off" class="btn" type="button" hidden>끄기</button>
+      </form>
+      <p class="muted small">암호를 바꾸면 그전에 들어와 있던 브라우저도 새 암호를 넣어야 해요. 한 곳에서 10번 틀리면 10분 동안 막아요.</p>
+    </section>
+
     <section class="card settings" aria-labelledby="set-title">
       <h2 id="set-title">설정</h2>
       <label id="autostart-row" class="switch-row" hidden>

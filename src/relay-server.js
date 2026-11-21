@@ -15,6 +15,7 @@ import { APP_NAME, APP_ID } from './brand.js';
 import { cleanLinkName, DROP_ID } from './drops.js';
 import { peerRelaySecret } from './peers.js';
 import { RelayClient } from '../public/relay.js';
+import { createRoomService } from './relay-rooms.js';
 
 const PC_ID = /^[0-9a-f]{16}$/;
 const SID = /^[0-9a-f]{32}$/;
@@ -172,6 +173,9 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     if (badTries.size > 10_000) badTries.clear(); // 기억할 주소가 너무 많아지면 비운다
   }
 
+  // 홈페이지에서 바로 주고받기 (설치 없이 브라우저끼리, 주인이 정한 4자리 암호로)
+  const rooms = createRoomService({ state, save, clientAddress, log });
+
   // ---- 웹 페이지 ----
 
   const server = http.createServer((req, res) => {
@@ -195,6 +199,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     res.setHeader('Referrer-Policy', 'no-referrer');
     const url = new URL(req.url, 'http://relay');
     let m;
+    if (url.pathname.startsWith('/api/web/') && (await rooms.handleHttp(req, res, url))) return;
     // 아이폰 단축어: 파일·텍스트를 그대로 올리면 이 중계 서버가 암호화된 통로로 PC에 넘긴다
     if ((m = /^\/s\/([0-9a-f]{16})$/.exec(url.pathname)) && (req.method === 'POST' || req.method === 'PUT')) return shortcutUpload(req, res, m[1], url);
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendText(res, 405, 'Method Not Allowed');
@@ -212,14 +217,8 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       }
       return sendJson(res, 200, { id: entry.pcId });
     }
-    if (url.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      return res.end(
-        `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${APP_NAME} 중계 서버</title>` +
-          `<body style="font:16px system-ui,sans-serif;margin:40px;color:#16181d"><h1>${APP_NAME} 중계 서버</h1>` +
-          `<p>PC의 ${APP_NAME} 화면에 있는 <b>[어디서나]</b> QR 코드를 휴대폰으로 스캔하세요.</p></body>`,
-      );
-    }
+    // 첫 화면: 설치 없이 브라우저끼리 주고받기 (암호를 넣어야 쓸 수 있다)
+    if (url.pathname === '/') return servePage(req, res, 'room.html');
     if ((m = /^\/p\/([0-9a-f]{16})\/?$/.exec(url.pathname))) return servePage(req, res, 'index.html', m[1]);
     if ((m = /^\/p\/([0-9a-f]{16})\/manifest\.webmanifest$/.exec(url.pathname))) return serveManifest(res, m[1]);
     // 링크 이름으로 받는 PC와 링크 번호를 찾는다 (함부로 이름을 맞혀 보지 못하게 틀린 횟수를 센다)
@@ -334,7 +333,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       body = Buffer.from(text);
     }
     const headers = { 'Content-Type': STATIC_TYPES[ext], 'Content-Length': body.length, 'Cache-Control': 'no-cache' };
-    if (name === 'index.html' || name === 'drop.html') {
+    if (name === 'index.html' || name === 'drop.html' || name === 'room.html') {
       const host = String(req.headers.host || '').replace(/[^A-Za-z0-9.:-]/g, '');
       headers['Content-Security-Policy'] = [
         "default-src 'self'",
@@ -374,6 +373,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     const url = new URL(req.url, 'http://relay');
     let m;
     if (url.pathname === '/ws/pc') return onControl(acceptWebSocket(req, socket, head), clientAddress(req));
+    if (url.pathname === '/ws/room') return rooms.handleUpgrade(req, socket, head);
     if ((m = /^\/ws\/c\/([0-9a-f]{16})$/.exec(url.pathname))) return onPhone(acceptWebSocket(req, socket, head), m[1]);
     if ((m = /^\/ws\/pc-accept\/([0-9a-f]{32})$/.exec(url.pathname))) return onAccept(acceptWebSocket(req, socket, head), m[1]);
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
@@ -597,7 +597,10 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       save();
     },
     /** 지금 이어져 주고받는 중인 휴대폰 수 (업데이트를 미룰지 정할 때 쓴다) */
-    activeSessions: () => [...sessionCount.values()].reduce((a, b) => a + b, 0),
+    activeSessions: () => [...sessionCount.values()].reduce((a, b) => a + b, 0) + rooms.active(),
+    /** 홈페이지 주고받기: 암호(숫자 4자리, null이면 끔)와 현황 */
+    setWebPin: (pin) => rooms.setPin(pin),
+    webOverview: () => rooms.overview(),
     overview() {
       return {
         invites: state.invites.map((i) => ({
@@ -612,6 +615,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       for (const entry of online.values()) entry.ws.close(1001, 'server closing');
       for (const entry of pending.values()) entry.phone.close(1001, 'server closing');
       for (const ws of live) ws.close(1001, 'server closing');
+      rooms.close();
       server.closeAllConnections?.();
       return new Promise((resolve) => server.close(() => resolve()));
     },

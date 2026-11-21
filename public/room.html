@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>{{APP_NAME}}</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    .room-page { max-width: 560px; margin: 0 auto; padding: 4px 16px calc(40px + env(safe-area-inset-bottom)); display: grid; gap: 16px; }
+    .room-head h1 { font-size: 22px; letter-spacing: -0.02em; }
+    .room-head p { margin: 6px 0 0; }
+    .center-card { display: grid; gap: 12px; text-align: center; }
+    .center-card h2 { font-size: 18px; }
+    .center-card p { margin: 0; }
+    .digits {
+      font: 700 24px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.3em; text-align: center;
+      min-height: 56px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); width: 100%;
+    }
+    .digits:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+    .error-text { color: var(--danger); font-size: 14px; margin: 0; }
+    .room-code { font: 800 40px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.12em; color: var(--accent); }
+    .room-qr { justify-self: center; width: 200px; padding: 10px; border-radius: 16px; background: #fff; border: 1px solid var(--border); }
+    .room-qr svg { display: block; width: 100%; height: auto; }
+    .or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+    .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+    .session-main { display: grid; gap: 14px; }
+    .session-main .dropzone { display: grid; }
+    @media (pointer: coarse) { .session-main .dropzone { display: none; } }
+    @media (pointer: fine) { .session-main .pick-buttons { display: none; } }
+    .peer-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
+    .xfer { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; }
+    .xfer-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .xfer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .xfer-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8em; overflow: auto; }
+    .xfer .bar { height: 6px; }
+    .xfer img { max-width: 100%; max-height: 220px; border-radius: 10px; justify-self: start; }
+    .dir { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .note { font-size: 12px; color: var(--muted); text-align: center; }
+    body.dragging .dropzone { border-color: var(--accent); background: var(--accent-soft); }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/icon.svg" alt="" width="30" height="30">
+      <span>{{APP_NAME}}</span>
+    </div>
+    <div id="status" class="status" data-state="waiting" role="status">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="status-text">준비 중…</span>
+    </div>
+  </header>
+
+  <main class="room-page">
+    <!-- 홈페이지 암호 -->
+    <form id="pin-view" class="card center-card" hidden>
+      <h2>암호를 넣어 주세요</h2>
+      <p class="muted small">이 홈페이지를 운영하는 사람이 정한 숫자 4자리예요. 이 브라우저는 30일 동안 기억해요.</p>
+      <input id="pin-input" class="digits" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" aria-label="암호 4자리" required>
+      <p id="pin-error" class="error-text" hidden></p>
+      <button class="btn primary" type="submit">들어가기</button>
+    </form>
+
+    <!-- 첫 화면: 시작하기 / 코드로 들어가기 -->
+    <section id="home-view" hidden>
+      <div class="room-head">
+        <h1>설치 없이 바로 주고받기</h1>
+        <p class="muted small">두 기기에서 이 홈페이지를 열고 같은 방에 들어오면 파일·사진·텍스트를 주고받을 수 있어요. 둘 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
+      </div>
+      <div class="card center-card" style="margin-top: 16px">
+        <button id="create" class="btn primary" type="button" style="min-height: 52px; font-size: 16px">새로 시작하기 (방 코드 만들기)</button>
+        <div class="or">또는</div>
+        <form id="join-form" style="display: grid; gap: 10px">
+          <input id="join-code" class="digits" type="text" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" placeholder="방 코드 6자리" autocomplete="off" aria-label="방 코드">
+          <button class="btn" type="submit">코드로 들어가기</button>
+        </form>
+        <p id="home-error" class="error-text" hidden></p>
+      </div>
+    </section>
+
+    <!-- 방을 만들고 상대를 기다리는 중 -->
+    <section id="wait-view" class="card center-card" hidden>
+      <h2>다른 기기에서 이 코드를 넣으세요</h2>
+      <div id="room-code" class="room-code"></div>
+      <div id="room-qr" class="room-qr" aria-label="방에 들어오는 QR 코드"></div>
+      <p class="muted small">다른 기기에서 <b id="room-host"></b>에 들어가 코드를 넣거나, 휴대폰 카메라로 QR을 찍으세요. 10분 동안 기다려요.</p>
+      <button id="wait-cancel" class="btn ghost" type="button">그만두기</button>
+    </section>
+
+    <!-- 연결됨: 주고받기 -->
+    <section id="session-view" hidden>
+      <div class="card session-main">
+        <div class="peer-line">
+          <strong id="peer-name">상대 기기</strong>
+          <button id="leave" class="btn small ghost" type="button">나가기</button>
+        </div>
+        <div class="pick-buttons">
+          <label class="big-btn primary">
+            <input id="pick-media" type="file" accept="image/*,video/*" multiple hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-image"/></svg>
+            <span>사진·동영상<br>보내기</span>
+          </label>
+          <label class="big-btn">
+            <input id="pick-file" type="file" multiple hidden>
+            <svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>
+            <span>파일<br>보내기</span>
+          </label>
+        </div>
+        <label class="dropzone">
+          <input id="pick-any" type="file" multiple hidden>
+          <svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>
+          <strong>보낼 파일을 여기에 끌어다 놓으세요</strong>
+          <span class="muted">클릭해서 고르거나, 캡처한 화면을 Ctrl+V로 붙여 넣어도 돼요</span>
+        </label>
+        <form id="text-form" class="text-form">
+          <textarea id="text-input" rows="1" placeholder="텍스트나 링크" aria-label="보낼 텍스트"></textarea>
+          <button class="btn primary" type="submit">보내기</button>
+        </form>
+      </div>
+      <section id="log-card" class="card" style="margin-top: 16px" hidden>
+        <h2>주고받은 것</h2>
+        <ul id="log" class="list"></ul>
+      </section>
+    </section>
+
+    <!-- 알림 화면 (끝남, 꺼짐 등) -->
+    <section id="notice-view" class="card center-card" hidden>
+      <h2 id="notice-title"></h2>
+      <p id="notice-text" class="muted"></p>
+      <button id="notice-home" class="btn primary" type="button">처음으로</button>
+    </section>
+
+    <p class="note">{{APP_NAME}} · 주고받은 것은 어디에도 저장되지 않아요. 창을 닫기 전에 받은 파일을 저장하세요.</p>
+  </main>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m0 0-5 5m5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+      <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+    </defs>
+  </svg>
+  <script type="module" src="/room.js"></script>
+</body>
+</html>

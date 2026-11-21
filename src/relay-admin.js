@@ -72,6 +72,12 @@ export function createAdminServer({ publicDir, port, ping, state, actions, log =
       actions.removePc(m[1]);
       return sendEmpty(res);
     }
+    // 홈페이지 주고받기의 암호 (숫자 4자리, 비우면 끈다)
+    if (req.method === 'POST' && p === '/api/web') {
+      const pin = body.pin === null || body.pin === '' || body.pin === undefined ? null : String(body.pin).trim();
+      actions.setWebPin(pin);
+      return sendEmpty(res);
+    }
     if (req.method === 'POST' && p === '/api/settings') {
       await actions.settings(body);
       return sendEmpty(res);

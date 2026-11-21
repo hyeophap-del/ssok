@@ -22,6 +22,13 @@ export const FRAME = {
   RAW_OPEN: 10,
   RAW_DATA: 11,
   RAW_END: 12,
+  // 홈페이지 방 (브라우저끼리): 양쪽 모두 보낼 수 있다. id는 보내는 쪽이 정한다.
+  FILE_HEAD: 20, // { name, size, type, lastModified }
+  FILE_DATA: 21,
+  FILE_END: 22,
+  FILE_CANCEL: 23,
+  FILE_DONE: 24, // 받는 쪽 → 보낸 쪽: 다 받았어요
+  TEXT: 25, // { text }
 };
 
 export const CHUNK = 64 * 1024;

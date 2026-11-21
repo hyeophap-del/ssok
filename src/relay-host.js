@@ -333,6 +333,7 @@ export async function runRelayHost({ args, exe, sourceRoot, version, extractAsse
         setup: { ...setup },
         reach: { ...reach },
         invites: relay.overview().invites,
+        web: relay.webOverview(),
         activeSessions: relay.activeSessions(),
         settings: {
           autostart: shortcutsSupported() ? fs.existsSync(startupShortcut(RELAY_NAME)) : null,
@@ -347,6 +348,7 @@ export async function runRelayHost({ args, exe, sourceRoot, version, extractAsse
       openLogin: () => setup.loginUrl && openUrl(setup.loginUrl),
       createInvite: (label) => relay.createInvite(label),
       setInviteDisabled: (code, disabled) => relay.setInviteDisabled(code, disabled),
+      setWebPin: (pin) => relay.setWebPin(pin),
       removePc: (id) => relay.removePc(id),
       settings: async ({ autostart, autoUpdate }) => {
         if (typeof autostart === 'boolean' && shortcutsSupported()) {

@@ -207,7 +207,7 @@ export function createApp(options) {
   const staticFiles = new Map();
   for (const name of fs.readdirSync(publicDir)) {
     const type = STATIC_TYPES[path.extname(name)];
-    if (type && !name.startsWith('relay-admin') && !name.startsWith('drop.')) staticFiles.set(name, { path: path.join(publicDir, name), type }); // 중계 서버 관리 화면 파일은 내주지 않는다
+    if (type && !name.startsWith('relay-admin') && !name.startsWith('drop.') && !name.startsWith('room.')) staticFiles.set(name, { path: path.join(publicDir, name), type }); // 중계 서버 관리 화면 파일은 내주지 않는다
   }
 
   const onRequest = (req, res) => {

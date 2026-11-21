@@ -236,6 +236,19 @@ function renderInvites() {
 }
 
 // ---- 설정 ----
+function renderWeb() {
+  const { web, hostname } = state;
+  if (!web) return;
+  $('web-host').textContent = hostname ? `https://${hostname}` : '이 중계 서버 주소';
+  $('web-off').hidden = !web.enabled;
+  $('web-state').replaceChildren(
+    web.enabled
+      ? el('span', { class: 'ok' }, `● 켜짐 · 암호 ${web.pin}`)
+      : el('span', { class: 'muted' }, '꺼짐 (암호를 정하면 켜져요)'),
+    web.enabled ? el('span', { class: 'muted' }, `지금 방 ${web.rooms}개 기다림 · ${web.connected}쌍 주고받는 중 · 지금까지 ${formatSize(web.bytes)}`) : null,
+  );
+}
+
 function renderSettings() {
   const { settings, version, update } = state;
   $('autostart-row').hidden = settings.autostart === null;
@@ -281,6 +294,7 @@ async function refresh() {
   renderSetup();
   renderInvites();
   renderSettings();
+  renderWeb();
 }
 
 let timer = null;
@@ -320,6 +334,24 @@ $('invite-form').addEventListener(
     const invite = await api('POST', '/api/invites', { label: $('invite-label').value.trim() });
     $('invite-label').value = '';
     toast(`초대 코드 ${invite.code}를 만들었어요.`);
+  }),
+);
+$('web-form').addEventListener(
+  'submit',
+  run(async (e) => {
+    e.preventDefault();
+    const pin = $('web-pin').value.trim();
+    if (!/^\d{4}$/.test(pin)) throw new Error('암호는 숫자 4자리로 정해 주세요.');
+    await api('POST', '/api/web', { pin });
+    $('web-pin').value = '';
+    toast(`홈페이지 암호를 ${pin}(으)로 정했어요.`);
+  }),
+);
+$('web-off').addEventListener(
+  'click',
+  run(async () => {
+    if (!confirm('홈페이지에서 바로 주고받기를 끌까요? 기다리던 방도 닫혀요.')) return;
+    await api('POST', '/api/web', { pin: null });
   }),
 );
 $('autostart').addEventListener('change', run(() => api('POST', '/api/settings', { autostart: $('autostart').checked })));
