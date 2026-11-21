@@ -47,6 +47,14 @@ public class MainActivity extends Activity {
                     Net.Result ping = Net.json(pc.host, pc.port, "GET", "/api/ping", null, null, pc.fingerprint, 4000);
                     // PC에 Tailscale을 나중에 깔았거나 주소가 바뀌었으면 알아 둔다
                     if (ping.status == 200 && pc.updateAlts(ping.json.optJSONArray("addrs"))) Store.save(this, pc);
+                    // PC에서 '어디서나 (중계 서버)'를 켜거나 바꿨으면 알아 둔다
+                    if (ping.status == 200) {
+                        Net.Result info = Net.json(pc.host, pc.port, "GET", "/api/peer/info", null, pc.key, pc.fingerprint, 4000);
+                        if (info.status == 200 && pc.updateRelay(info.json)) {
+                            Store.save(this, pc);
+                            runOnUiThread(this::render);
+                        }
+                    }
                     if (ping.status == 200 && ping.json.optInt("android", 0) > mine) {
                         runOnUiThread(() -> showAppUpdate(pc));
                         return;
@@ -108,6 +116,9 @@ public class MainActivity extends Activity {
                 LinearLayout card = Ui.card(this);
                 Ui.add(card, Ui.heading(this, pc.name), 0);
                 Ui.add(card, Ui.muted(this, pc.host + (pc.port == Net.DEFAULT_PORT ? "" : ":" + pc.port) + " · 암호화 연결"), 2);
+                Ui.add(card, Ui.muted(this, pc.relay.isEmpty()
+                        ? "집 밖에서 보내려면 PC [설정]에서 ‘어디서나 (중계 서버)’를 켜고, 같은 Wi-Fi에서 이 앱을 한 번 열어 주세요."
+                        : "어디서나: 집 밖에서는 " + pc.relay.replaceFirst("^https://", "") + "를 거쳐 보내요"), 2);
                 Ui.add(card, Ui.button(this, "연결 해제", false, v -> confirmUnpair(pc)), 12);
                 Ui.add(column, card, 8);
             }
@@ -160,7 +171,16 @@ public class MainActivity extends Activity {
                         try {
                             Net.json(pc.host, pc.port, "POST", "/api/peer/unpair", null, pc.key, pc.fingerprint, 5000);
                         } catch (Exception ignored) {
-                            // PC가 꺼져 있다
+                            // 같은 Wi-Fi에 없으면 중계 서버로 알린다
+                            if (!pc.relay.isEmpty()) {
+                                try (Relay relay = Relay.connect(pc.relay, pc.id, Store.appId(this), Relay.peerSecret(pc.key), Store.deviceName(this), 10000)) {
+                                    java.util.Map<String, String> headers = new java.util.HashMap<>();
+                                    headers.put("x-requested-with", Net.APP_ID);
+                                    relay.request("POST", "/api/peer/unpair", headers, null, 0, null);
+                                } catch (Exception alsoIgnored) {
+                                    // PC가 꺼져 있다 (나중에 PC에서 지워도 된다)
+                                }
+                            }
                         }
                     }).start();
                 })

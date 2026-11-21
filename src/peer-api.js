@@ -219,7 +219,8 @@ export function createPeerApi({
       if (kind === 'pc') infoAt.set(id, Date.now());
       changed();
       log('paired', name);
-      return sendJson(res, 200, { key: recvKey, ...(kind === 'pc' ? { relay: myRelay() } : {}) });
+      // 이 PC의 중계 서버 주소도 알려 준다 (PC·휴대폰 앱이 집 밖에서 중계로 보낼 때 쓴다)
+      return sendJson(res, 200, { key: recvKey, relay: myRelay() });
     }
     if (decision === 'deny') return sendJson(res, 403, { error: '상대 기기에서 거절했어요.' });
     if (decision === 'timeout') return sendJson(res, 408, { error: '상대 기기에서 응답이 없어요.' });
@@ -246,10 +247,10 @@ export function createPeerApi({
       return true;
     }
 
-    // 연결된 PC가 이 PC의 중계 서버 주소를 물어볼 때 (설정을 바꿨을 수 있어서 가끔 묻는다)
+    // 연결된 PC·휴대폰 앱이 이 PC의 중계 서버 주소를 물어볼 때 (설정을 바꿨을 수 있어서 가끔 묻는다)
     if (pathname === '/api/peer/info' && method === 'GET') {
-      if (ctx.peer?.kind !== 'pc') {
-        sendJson(res, 403, { error: '연결된 PC만 할 수 있어요.' });
+      if (!ctx.peer) {
+        sendJson(res, 403, { error: '연결된 기기만 할 수 있어요.' });
         return true;
       }
       sendJson(res, 200, { id: self().id, name: self().name, relay: myRelay() });

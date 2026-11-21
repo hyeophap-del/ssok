@@ -469,7 +469,8 @@ async function main() {
       links: () => drops.list().map((l) => ({ name: l.name, linkId: l.id })),
       peerLookup: (id) => {
         const peer = peerBook.getPaired(id);
-        return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
+        // 연결된 PC와 휴대폰 앱 모두: 그 기기와 나눠 가진 키로 통로를 연다
+        return peer ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
       },
       log: logEvent,
       onStatus: (status) => {

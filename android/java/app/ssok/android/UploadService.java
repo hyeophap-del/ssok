@@ -9,6 +9,9 @@ import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.database.Cursor;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -25,6 +28,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -49,6 +54,8 @@ public class UploadService extends Service {
     private NotificationManager notifications;
     private int pending;
     private int resultId = 100;
+    private Relay relay; // 이번에 보내는 동안 열어 둔 중계 통로 (여러 파일을 보낼 때 다시 쓴다)
+    private boolean viaRelay; // 마지막으로 중계 서버로 보냈는지 (결과 알림에 적는다)
 
     /** 상대 PC가 연결을 해제했다 */
     private static final class UnpairedException extends Exception {}
@@ -111,6 +118,7 @@ public class UploadService extends Service {
                 .createWifiLock(Build.VERSION.SDK_INT >= 29 ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ssok:upload");
         wake.acquire(6 * 60 * 60 * 1000L);
         wifi.acquire();
+        viaRelay = false;
         try {
             if (text != null && (uris == null || uris.isEmpty())) {
                 sendText(pc, text);
@@ -130,19 +138,21 @@ public class UploadService extends Service {
                 } catch (RejectedException e) {
                     lastError = e.getMessage();
                 } catch (Exception e) {
-                    lastError = pc.name + "에 연결하지 못했어요. PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요.\n(원인: " + Net.describe(e) + ")";
+                    lastError = failureText(pc, e);
                     break; // 연결이 안 되면 남은 파일도 안 된다
                 }
             }
             int total = uris == null ? 0 : uris.size();
-            if (sent == total) result(pc.name + "(으)로 " + (total == 1 ? "보냈어요" : total + "개를 보냈어요"), "PC의 받은 파일 폴더에 저장됐어요.", false);
+            if (sent == total) result(pc.name + "(으)로 " + (total == 1 ? "보냈어요" : total + "개를 보냈어요"), viaRelay ? "집 밖이라 중계 서버를 거쳐 보냈어요 (암호화). PC의 받은 파일 폴더에 저장됐어요." : "PC의 받은 파일 폴더에 저장됐어요.", false);
             else result(total + "개 중 " + sent + "개를 보냈어요", lastError, true);
         } catch (UnpairedException e) {
             Store.remove(this, pc.id);
             result("PC에서 연결이 해제됐어요", pc.name + "에 다시 연결해 주세요.", true);
         } catch (Exception e) {
-            result("보내지 못했어요", pc.name + "에 연결하지 못했어요. PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요.\n(원인: " + Net.describe(e) + ")", true);
+            result("보내지 못했어요", failureText(pc, e), true);
         } finally {
+            if (relay != null) relay.close();
+            relay = null;
             wifi.release();
             wake.release();
         }
@@ -151,9 +161,13 @@ public class UploadService extends Service {
     // ---- 보내기 ----
 
     private void sendText(Store.Pc pc, String text) throws Exception {
-        withRediscovery(pc, () -> {
+        byte[] body = new JSONObject().put("text", text).toString().getBytes("UTF-8");
+        deliver(pc, () -> {
             Net.Result r = Net.json(pc.host, pc.port, "POST", "/api/text", new JSONObject().put("text", text), pc.key, pc.fingerprint, 15000);
             check(r.status, r.json);
+            return null;
+        }, () -> {
+            relayRequest(pc, "/api/text", "application/json", body.length, () -> new java.io.ByteArrayInputStream(body), null);
             return null;
         });
     }
@@ -182,9 +196,14 @@ public class UploadService extends Service {
         final File source = temp;
         final long length = size;
         final String fileName = name;
+        Opener opener = () -> source != null ? new FileInputStream(source) : resolver.openInputStream(uri);
         try {
-            withRediscovery(pc, () -> {
-                upload(pc, fileName, length, lastModified, index, total, () -> source != null ? new FileInputStream(source) : resolver.openInputStream(uri));
+            deliver(pc, () -> {
+                upload(pc, fileName, length, lastModified, index, total, opener);
+                return null;
+            }, () -> {
+                String path = "/api/upload?name=" + URLEncoder.encode(fileName, "UTF-8") + (lastModified > 0 ? "&lastModified=" + lastModified : "");
+                relayRequest(pc, path, "application/octet-stream", length, opener, progressFor(pc, fileName, length, index, total, true));
                 return null;
             });
         } finally {
@@ -202,6 +221,112 @@ public class UploadService extends Service {
 
     private interface Progress {
         void update(long done);
+    }
+
+    /**
+     * 같은 Wi-Fi(또는 Tailscale)로 바로 보내 보고, 안 되면 중계 서버로 보낸다.
+     * 휴대폰이 데이터(LTE·5G)로만 연결되어 있으면 바로 보내기는 어차피 안 되니 중계 서버부터 쓴다.
+     */
+    private void deliver(Store.Pc pc, Attempt direct, Attempt viaRelayServer) throws Exception {
+        boolean canRelay = !pc.relay.isEmpty();
+        boolean relayTried = false;
+        Exception relayError = null;
+        // 이번에 보내는 중에 이미 중계로 보냈으면 남은 파일도 바로 중계로 (파일마다 바로 보내기를 기다리지 않게)
+        if (canRelay && (viaRelay || !onLocalNetwork())) {
+            relayTried = true;
+            try {
+                viaRelayServer.run();
+                viaRelay = true;
+                return;
+            } catch (UnpairedException | RejectedException e) {
+                throw e;
+            } catch (Exception e) {
+                relayError = e; // Tailscale 등으로 바로 닿을 수도 있으니 아래에서 마저 해 본다
+            }
+        }
+        try {
+            withRediscovery(pc, direct);
+        } catch (UnpairedException | RejectedException e) {
+            throw e;
+        } catch (Exception e) {
+            if (!canRelay) throw e;
+            if (relayTried) throw relayError;
+            viaRelayServer.run();
+            viaRelay = true;
+        }
+    }
+
+    /** 휴대폰이 지금 Wi-Fi(또는 유선)에 연결되어 있는지 */
+    private boolean onLocalNetwork() {
+        try {
+            ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+            Network active = cm.getActiveNetwork();
+            NetworkCapabilities caps = active == null ? null : cm.getNetworkCapabilities(active);
+            return caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET));
+        } catch (Exception e) {
+            return true; // 모르면 지금처럼 바로 보내기부터
+        }
+    }
+
+    /** 중계 서버를 거쳐 PC의 쏙에 보낸다. 통로는 한 번 열어 두고 이번에 보내는 파일들에 다시 쓴다. */
+    private void relayRequest(Store.Pc pc, String path, String contentType, long length, Opener opener, Progress progress) throws Exception {
+        notifications.notify(PROGRESS_ID, progress(pc.name + "(으)로 보내는 중", 0, 0, true, "집 밖이라 중계 서버를 거쳐요"));
+        Map<String, String> headers = new HashMap<>();
+        headers.put("content-type", contentType);
+        headers.put("x-requested-with", Net.APP_ID);
+        try {
+            if (relay == null) relay = Relay.connect(pc.relay, pc.id, Store.appId(this), Relay.peerSecret(pc.key), Store.deviceName(this), 15000);
+            Relay.Response r;
+            try (InputStream in = opener.open()) {
+                if (in == null) throw new RejectedException("파일을 읽을 수 없어요.");
+                r = relay.request("POST", path, headers, in, length, progress == null ? null : progress::update);
+            }
+            JSONObject json;
+            try {
+                json = new JSONObject(r.body == null ? "" : r.body);
+            } catch (Exception e) {
+                json = new JSONObject();
+            }
+            check(r.status, json);
+        } catch (Relay.RelayException e) {
+            closeRelay();
+            // PC에서 연결을 해제했거나(모르는 기기) 키가 바뀌었다
+            if ("UNKNOWN_PEER".equals(e.code) || "BAD_KEY".equals(e.code)) throw new UnpairedException();
+            if ("PC_OFFLINE".equals(e.code) || "PC_TIMEOUT".equals(e.code)) throw new IOException(pc.name + "의 쏙이 꺼져 있거나 중계 서버에 연결되어 있지 않아요.", e);
+            throw e;
+        } catch (IOException e) {
+            closeRelay(); // 끊긴 통로는 버린다 (다음 파일은 새로 연다)
+            throw e;
+        }
+    }
+
+    private void closeRelay() {
+        if (relay != null) relay.close();
+        relay = null;
+    }
+
+    /** 알림의 진행률 (바로 보낼 때와 같은 모양) */
+    private Progress progressFor(Store.Pc pc, String name, long size, int index, int total, boolean relayed) {
+        String label = (total > 1 ? index + "/" + total + " · " : "") + name;
+        long started = System.currentTimeMillis();
+        long[] last = {0};
+        return done -> {
+            long now = System.currentTimeMillis();
+            if (now - last[0] < 500) return;
+            last[0] = now;
+            double seconds = Math.max(0.5, (now - started) / 1000.0);
+            String speed = formatSize((long) (done / seconds)) + "/s";
+            notifications.notify(PROGRESS_ID, progress(label, (int) (done * 1000 / Math.max(1, size)), 1000, false,
+                    pc.name + "(으)로 보내는 중 · " + (relayed ? "중계 서버 · " : "") + speed));
+        };
+    }
+
+    /** 보내지 못했을 때 알림 문구 */
+    private static String failureText(Store.Pc pc, Exception e) {
+        String hint = pc.relay.isEmpty()
+                ? "PC에서 쏙이 켜져 있고 같은 Wi-Fi인지 확인해 주세요. 집 밖에서도 보내려면 PC [설정]에서 ‘어디서나 (중계 서버)’를 켜고, 같은 Wi-Fi에서 이 앱을 한 번 열어 주세요."
+                : "PC에서 쏙이 켜져 있는지 확인해 주세요.";
+        return pc.name + "에 연결하지 못했어요. " + hint + "\n(원인: " + Net.describe(e) + ")";
     }
 
     private void upload(Store.Pc pc, String name, long size, long lastModified, int index, int total, Opener opener) throws Exception {

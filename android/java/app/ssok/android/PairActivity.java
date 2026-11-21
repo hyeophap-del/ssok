@@ -103,6 +103,7 @@ public class PairActivity extends Activity {
                 pc.fingerprint = fingerprint;
                 pc.key = second.json.optString("key");
                 pc.updateAlts(ping.json.optJSONArray("addrs")); // 집 Wi-Fi·Tailscale 주소를 함께 기억한다
+                pc.updateRelay(second.json); // PC가 중계 서버를 쓰면 집 밖에서도 그 서버로 보낸다
                 Store.save(this, pc);
                 done(pcName + "에 연결했어요!", "이제 갤러리에서 보낼 것을 고르고 공유 → 쏙을 누르면 바로 " + pcName + "(으)로 가요.");
             } else if (second.status == 403) {

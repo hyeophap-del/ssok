@@ -23,10 +23,20 @@ final class Store {
         String fingerprint; // 그 PC의 인증서 지문 (이 인증서가 아니면 보내지 않는다)
         String key; // 그 PC에 보낼 때 내미는 키
         List<String> alts = new ArrayList<>(); // 그 PC의 다른 주소들 (집 Wi-Fi, Tailscale 등). 지금 주소가 안 되면 써 본다.
+        String relay = ""; // 그 PC가 쓰는 중계 서버 (https://ssok.example.com). 집 밖에서는 이 서버를 거쳐 보낸다.
 
         JSONObject toJson() throws Exception {
             return new JSONObject().put("id", id).put("name", name).put("host", host).put("port", port).put("fingerprint", fingerprint).put("key", key)
-                    .put("alts", new JSONArray(alts));
+                    .put("alts", new JSONArray(alts)).put("relay", relay);
+        }
+
+        /** PC가 알려 준 중계 서버 주소로 바꾼다 (끄면 비어 있다). 바뀌었으면 true. */
+        boolean updateRelay(JSONObject json) {
+            String next = json == null || json.isNull("relay") ? "" : json.optString("relay", "");
+            if (!Relay.isValidRelayUrl(next)) next = "";
+            if (next.equals(relay)) return false;
+            relay = next;
+            return true;
         }
 
         /** PC가 알려 준 주소 목록으로 다른 주소들을 갱신한다. 바뀌었으면 true. */
@@ -52,6 +62,7 @@ final class Store {
             pc.key = j.optString("key");
             JSONArray alts = j.optJSONArray("alts");
             for (int i = 0; alts != null && i < alts.length(); i++) pc.alts.add(alts.optString(i));
+            pc.relay = Relay.isValidRelayUrl(j.optString("relay", "")) ? j.optString("relay") : "";
             return pc;
         }
     }

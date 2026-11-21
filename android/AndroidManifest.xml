@@ -4,6 +4,8 @@
     package="app.ssok.android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 지금 Wi-Fi인지 데이터(LTE·5G)인지 알아야 집 밖이면 바로 중계 서버로 보낸다 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

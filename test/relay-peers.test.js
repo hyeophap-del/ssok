@@ -79,7 +79,7 @@ function connectRelay(pc, invite) {
     tunnelPorts: pc.tunnelPorts,
     peerLookup: (id) => {
       const peer = pc.book.getPaired(id);
-      return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
+      return peer ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
     },
     onStatus: (s) => statuses.push(s),
   });
@@ -348,4 +348,28 @@ test('연결 코드 통로로는 연결 과정만 밟을 수 있다 (PC 화면 �
     RelayClient.connect(`${relayBase.replace('http', 'ws')}/ws/c/${C.id}`, pairChannelSecret(json.code, C.id), { kid: 'pair' }),
     (err) => err.code === 'UNKNOWN_PEER',
   );
+});
+
+test('휴대폰 앱도 연결할 때 받은 키로 중계 서버를 거쳐 보낸다 (앱 전용 기능만)', async () => {
+  const { D } = pcs;
+  // 앱과 연결된 상태 (연결 과정은 peers.test.js에서 시험한다)
+  const appId = 'a9a9a9a9a9a9a9a9';
+  const key = 'app-key-0123456789abcdefghijklmn';
+  D.book.pair({ id: appId, name: 'Galaxy S24', kind: 'app', recvKey: key });
+  const app = await RelayClient.connect(`${relayBase.replace('http', 'ws')}/ws/c/${D.id}`, peerRelaySecret(key), { kid: appId, device: 'Galaxy S24' });
+  const info = await app.request('GET', '/api/peer/info');
+  assert.equal(info.status, 200);
+  assert.equal((await info.json()).relay, relayBase);
+  const photo = crypto.randomBytes(120_000);
+  const up = await app.request('POST', `/api/upload?name=${encodeURIComponent('앱에서 보낸 사진.jpg')}`, {
+    headers: { 'x-requested-with': APP_ID, 'content-type': 'application/octet-stream' },
+    body: photo,
+  });
+  assert.equal(up.status, 201);
+  assert.deepEqual(fs.readFileSync(path.join(D.receivedDir, '앱에서 보낸 사진.jpg')), photo);
+  const item = D.store.list().find((i) => i.name === '앱에서 보낸 사진.jpg');
+  assert.equal(item.device, 'Galaxy S24');
+  assert.equal(item.from, 'peer');
+  assert.equal((await app.request('GET', '/api/items')).status, 403, '휴대폰 브라우저처럼 목록을 보지는 못한다');
+  app.close();
 });
