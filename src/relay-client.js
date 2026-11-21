@@ -7,6 +7,9 @@ import { SecureSocket, FRAME, CHUNK } from '../public/relay.js';
 const PASS_REQUEST = ['content-type', 'content-length', 'x-requested-with', 'range', 'accept', 'user-agent'];
 const PASS_RESPONSE = ['content-type', 'content-length', 'content-disposition', 'content-range', 'accept-ranges', 'last-modified'];
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'DELETE']);
+// 연결된 다른 PC가 중계로 쓸 수 있는 것: 파일·텍스트 보내기, 연결 해제, 중계 주소 확인 (휴대폰 권한은 주지 않는다)
+const PEER_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
+const PEER_ID = /^[0-9a-f]{16}$/;
 
 const pick = (headers, names) => Object.fromEntries(names.filter((n) => headers[n] !== undefined).map((n) => [n, String(headers[n])]));
 const decode = (bytes) => new TextDecoder().decode(bytes);
@@ -22,6 +25,8 @@ const decode = (bytes) => new TextDecoder().decode(bytes);
  * @param {string} options.cookie     이 PC의 쏙에 휴대폰처럼 들어가는 쿠키 (예: ssok=접속코드)
  * @param {string} options.relayKey   중계로 온 요청임을 표시하는 값 (PC 화면 권한을 주지 않으려고)
  * @param {(status: {state: string, error?: string}) => void} [options.onStatus]
+ * @param {(peerId: string) => ({secret: Uint8Array, key: string} | null)} [options.peerLookup]
+ *        연결된 다른 PC가 중계로 들어올 때: 그 PC와 나눠 가진 열쇠와, 그 PC가 이 PC에 내미는 키
  */
 export function startRelayClient({
   relayUrl,
@@ -35,6 +40,7 @@ export function startRelayClient({
   cookie,
   relayKey,
   onStatus = () => {},
+  peerLookup = () => null,
   log = () => {},
   WebSocketImpl = globalThis.WebSocket,
 }) {
@@ -135,7 +141,8 @@ export function startRelayClient({
     const closed = new Promise((r) => (resolveClosed = r));
     const secure = new SecureSocket(ws, {
       role: 'pc',
-      secret,
+      // 휴대폰은 QR의 비밀 열쇠로, 연결된 PC는 자기 번호(kid)로 찾은 열쇠로 들어온다
+      secret: (hello) => (hello.kid === undefined ? secret : PEER_ID.test(String(hello.kid)) ? (peerLookup(hello.kid)?.secret ?? null) : null),
       onFrame: (type, id, payload) => {
         try {
           onFrame(type, id, payload);
@@ -153,20 +160,27 @@ export function startRelayClient({
         resolveClosed();
       },
     });
-    secure.ready.then((info) => log('relay-phone', info?.device || '휴대폰')).catch(() => {});
+    secure.ready.then((info) => !secure.hello?.kid && log('relay-phone', info?.device || '휴대폰')).catch(() => {});
+    const refuse = (id, status) => secure.send(FRAME.RES_HEAD, id, { status, headers: {} }).then(() => secure.send(FRAME.RES_END, id, {})).catch(() => {});
 
     function onFrame(type, id, payload) {
       if (type === FRAME.REQ_HEAD) {
         const head = JSON.parse(decode(payload));
         const path = String(head.path || '');
-        if (!METHODS.has(head.method) || !path.startsWith('/') || path.startsWith('//')) {
-          secure.send(FRAME.RES_HEAD, id, { status: 400, headers: {} }).then(() => secure.send(FRAME.RES_END, id, {}));
-          return;
-        }
+        if (!METHODS.has(head.method) || !path.startsWith('/') || path.startsWith('//')) return refuse(id, 400);
         const headers = pick(Object.fromEntries(Object.entries(head.headers || {}).map(([k, v]) => [k.toLowerCase(), v])), PASS_REQUEST);
         headers.host = `127.0.0.1:${localPort}`;
-        headers.cookie = cookie;
         headers['x-ssok-relay'] = relayKey;
+        const kid = secure.hello?.kid;
+        if (kid) {
+          // 연결된 다른 PC: 휴대폰 쿠키 없이, 그 PC의 키로 PC끼리 기능만 쓴다 (통로의 열쇠가 곧 그 PC라는 증명)
+          if (!PEER_ROUTES.has(`${head.method} ${path.split('?')[0]}`)) return refuse(id, 403);
+          const peer = peerLookup(kid);
+          if (!peer) return refuse(id, 401);
+          headers.authorization = `Bearer ${peer.key}`;
+        } else {
+          headers.cookie = cookie;
+        }
         const req = http.request({ host: '127.0.0.1', port: localPort, method: head.method, path, headers });
         const entry = { req, res: null };
         streams.set(id, entry);

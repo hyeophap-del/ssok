@@ -1203,7 +1203,7 @@ function renderTargets() {
   add.append(icon('i-plus'), el('span', {}, paired.length ? 'PC 추가' : '다른 PC'));
   $('targets').replaceChildren(
     targetChip('phone', 'i-phone', '휴대폰', undefined, !peer),
-    ...paired.map((p) => targetChip(p.id, 'i-pc', p.name, p.online, peer?.id === p.id)),
+    ...paired.map((p) => targetChip(p.id, 'i-pc', p.name, p.online, peer?.id === p.id, p.via)),
     add,
   );
 
@@ -1212,8 +1212,12 @@ function renderTargets() {
   if (peer) {
     $('dropzone-title').textContent = `${peer.name}에 보낼 파일을 여기에 끌어다 놓으세요`;
     $('dropzone-hint').textContent = offline
-      ? `지금은 꺼져 있는 것 같아요. 그 PC에서 ${APP_NAME} 프로그램을 켜 주세요.`
-      : '그 PC의 받은 파일 폴더에 바로 저장돼요. 캡처한 화면은 Ctrl+V로 붙여 넣으세요.';
+      ? peer.relay
+        ? `지금은 꺼져 있는 것 같아요. 그 PC에서 ${APP_NAME} 프로그램을 켜 주세요.`
+        : `같은 네트워크에서 보이지 않아요. 그 PC가 켜져 있는지 확인해 주세요. 집 밖에서도 보내려면 두 PC 모두 [설정]의 ‘어디서나 (중계 서버)’를 켜 두세요.`
+      : peer.via === 'relay'
+        ? '집 밖에 있어 중계 서버를 거쳐 보내요 (종단간 암호화). 같은 Wi-Fi일 때보다 느릴 수 있어요.'
+        : '그 PC의 받은 파일 폴더에 바로 저장돼요. 캡처한 화면은 Ctrl+V로 붙여 넣으세요.';
     $('text-input').placeholder = `${peer.name}에 보낼 텍스트나 링크`;
   } else {
     $('dropzone-title').textContent = '휴대폰으로 보낼 파일을 여기에 끌어다 놓으세요';
@@ -1222,16 +1226,16 @@ function renderTargets() {
   }
 }
 
-function targetChip(id, iconId, label, online, selected) {
+function targetChip(id, iconId, label, online, selected, via = null) {
   const chip = el('button', {
     type: 'button',
     class: 'chip',
     'data-target': id,
     'aria-pressed': String(selected),
-    title: online === false ? `${label} · 꺼져 있음` : label,
+    title: online === false ? `${label} · 꺼져 있음` : via === 'relay' ? `${label} · 어디서나 (중계 서버로 보내요)` : label,
   });
   chip.append(icon(iconId), el('span', { class: 'chip-name' }, label));
-  if (online !== undefined) chip.append(el('span', { class: online ? 'chip-dot' : 'chip-dot off', 'aria-hidden': 'true' }));
+  if (online !== undefined) chip.append(el('span', { class: online ? (via === 'relay' ? 'chip-dot relay' : 'chip-dot') : 'chip-dot off', 'aria-hidden': 'true' }));
   return chip;
 }
 
@@ -1259,8 +1263,8 @@ function peerRow(peer) {
   const sub = el('div', { class: 'peer-sub' });
   if (peer.kind === 'app') sub.append('휴대폰 앱');
   else {
-    if (peer.paired) sub.append(el('span', { class: peer.online ? 'on' : '' }, peer.online ? '켜져 있음' : '꺼져 있음'), ' · ');
-    sub.append(peer.address);
+    if (peer.paired) sub.append(el('span', { class: peer.online ? 'on' : '' }, peer.via === 'relay' ? '어디서나 (중계)' : peer.online ? '켜져 있음' : '꺼져 있음'), ' · ');
+    sub.append(peer.via === 'relay' ? '집 밖에서도 보낼 수 있어요' : peer.address);
   }
   info.append(sub);
 

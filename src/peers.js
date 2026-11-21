@@ -31,6 +31,31 @@ export function isValidPort(port) {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
+/**
+ * 상대 PC의 중계 서버 주소 확인: 'https://ssok.example.com' 꼴만 받는다.
+ * allowLocal은 시험할 때만 (이 PC 안의 http 주소).
+ */
+export function cleanRelayUrl(value, { allowLocal = false } = {}) {
+  if (typeof value !== 'string' || value.length > 200) return null;
+  try {
+    const url = new URL(value);
+    if (url.pathname !== '/' || url.search || url.hash || url.username || url.password) return null;
+    if (url.protocol === 'https:' && /^[A-Za-z0-9.-]+$/.test(url.hostname)) return `https://${url.host}`;
+    if (allowLocal && url.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(url.hostname)) return `http://${url.host}`;
+  } catch {
+    // 주소가 아니다
+  }
+  return null;
+}
+
+/**
+ * 연결된 PC끼리 중계 서버로 주고받을 때 쓰는 비밀 열쇠.
+ * 연결할 때 이미 나눠 가진 키(A가 B에게 내미는 키 = B가 A에게 준 키)에서 만들므로 따로 주고받을 것이 없다.
+ */
+export function peerRelaySecret(key) {
+  return new Uint8Array(crypto.createHash('sha256').update(`ssok-peer-relay-v1:${key}`).digest());
+}
+
 export function isValidKey(key) {
   return typeof key === 'string' && PEER_KEY.test(key);
 }
@@ -144,6 +169,7 @@ export class PeerBook {
     this.now = now;
     this.paired = new Map();
     this.seen = new Map();
+    this.relaySeen = new Map(); // 같은 네트워크에는 없지만 중계 서버에 연결되어 있는 PC → 마지막으로 확인한 때
   }
 
   load() {
@@ -204,6 +230,36 @@ export class PeerBook {
     return this.signature() !== before;
   }
 
+/** 중계 서버에 연결되어 있는 것을 확인했다. 목록 모양이 바뀌었으면 true. */
+  sawRelay(id) {
+    const before = this.signature();
+    this.relaySeen.set(id, this.now());
+    return this.signature() !== before;
+  }
+
+  lostRelay(id) {
+    const before = this.signature();
+    this.relaySeen.delete(id);
+    return this.signature() !== before;
+  }
+
+  /** 그 PC의 중계 서버 주소를 바꾼다 (그 PC에서 설정을 바꾼 경우). 바뀌었으면 true. */
+  setRelay(id, relay) {
+    const peer = this.paired.get(id);
+    if (!peer || peer.kind !== 'pc' || (peer.relay ?? null) === (relay ?? null)) return false;
+    if (relay) peer.relay = relay;
+    else delete peer.relay;
+    if (!relay) this.relaySeen.delete(id);
+    this.save();
+    return true;
+  }
+
+  /** 같은 네트워크에서는 안 보이지만 중계 서버로 닿는 PC인지 */
+  isRelayOnline(id) {
+    const at = this.relaySeen.get(id);
+    return Boolean(at && this.paired.get(id)?.relay && this.now() - at < ONLINE_MS);
+  }
+
   /** 확인된 새 주소로 바꾼다 (IP가 바뀐 경우) */
   moveTo(id, address, port) {
     const peer = this.paired.get(id);
@@ -215,8 +271,8 @@ export class PeerBook {
   }
 
   pair(peer) {
-    const { id, name, kind, address, port, cert, sendKey, recvKey } = peer;
-    const record = kind === 'app' ? { id, name, kind, recvKey } : { id, name, kind, address, port, cert, sendKey, recvKey };
+    const { id, name, kind, address, port, cert, sendKey, recvKey, relay } = peer;
+    const record = kind === 'app' ? { id, name, kind, recvKey } : { id, name, kind, address, port, cert, sendKey, recvKey, ...(relay ? { relay } : {}) };
     this.paired.set(id, { ...record, pairedAt: this.now() });
     this.save();
   }
@@ -226,6 +282,7 @@ export class PeerBook {
     if (!peer) return null;
     this.paired.delete(id);
     this.seen.delete(id);
+    this.relaySeen.delete(id);
     this.save();
     return peer;
   }
@@ -246,7 +303,10 @@ export class PeerBook {
         address: peer.address ?? null,
         port: peer.port ?? null,
         paired: true,
-        online: this.isOnline(peer.id),
+        // lan: 같은 네트워크에서 바로, relay: 중계 서버를 거쳐 (집 밖 등)
+        online: this.isOnline(peer.id) || this.isRelayOnline(peer.id),
+        via: this.isOnline(peer.id) ? 'lan' : this.isRelayOnline(peer.id) ? 'relay' : null,
+        relay: Boolean(peer.relay),
       });
     }
     for (const seen of this.seen.values()) {
@@ -279,6 +339,7 @@ function isValidPairedPeer(peer) {
     typeof peer.address === 'string' &&
     isValidPort(peer.port) &&
     isValidKey(peer.sendKey) &&
-    isValidCert(peer.cert)
+    isValidCert(peer.cert) &&
+    (peer.relay === undefined || typeof peer.relay === 'string')
   );
 }

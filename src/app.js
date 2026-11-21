@@ -160,6 +160,7 @@ export function createApp(options) {
     tailscaleAddress = () => null, // Tailscale을 켜 두었으면 집 밖에서도 들어올 수 있는 주소
     relayKey = null, // 중계 서버를 거쳐 온 휴대폰 요청에 붙는 값 (이 PC에서 온 것처럼 보여도 PC 화면 권한은 주지 않는다)
     relayInfo = () => null, // 어디서나(중계) 주소와 연결 상태
+    relayUrl = () => null, // 이 PC가 쓰는 중계 서버 주소 (연결된 다른 PC에게 알려 줘서 집 밖에서도 보내게 한다)
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -190,6 +191,7 @@ export function createApp(options) {
         hasHostPage: () => [...clients].some((c) => c.isHost),
         showHostPage,
         announce,
+        relayUrl,
         log,
         ...peerOptions,
       })
@@ -231,13 +233,13 @@ export function createApp(options) {
   }
 
   function authenticate(req, url) {
+    // 중계로 온 요청(휴대폰, 연결된 다른 PC)은 이 PC 안에서 대신 보낸 것이라 주소만 보면 PC 화면처럼 보인다. 표시를 보고 구별한다.
+    const viaRelay = Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey);
     // 연결해 둔 다른 PC는 서로 주고받은 키로 들어온다. 같은 PC에서 왔더라도 'PC 화면' 권한은 주지 않는다.
-    const peer = peers?.authenticate(req);
+    const peer = peers?.authenticate(req, { viaRelay });
     if (peer !== undefined) {
       return { isHost: false, authed: Boolean(peer), peer, giveCookie: false, device: peer?.name ?? '다른 PC' };
     }
-    // 중계로 온 휴대폰 요청은 이 PC 안에서 대신 보낸 것이라 주소만 보면 PC 화면처럼 보인다. 표시를 보고 휴대폰으로 대한다.
-    const viaRelay = Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey);
     const isHost = !viaRelay && isHostAddress(req.socket.remoteAddress);
     // PC 자신의 요청이라도 다른 웹사이트가 몰래 보낸 요청이면 믿지 않는다.
     const site = req.headers['sec-fetch-site'];

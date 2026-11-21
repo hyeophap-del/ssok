@@ -232,7 +232,7 @@ test('주소로 다른 PC를 찾고, 상대 화면에서 허용하면 서로 연
 
   const list = await request(pcs.A, { path: '/api/peers' });
   assert.equal(list.status, 200);
-  assert.deepEqual(list.json.peers, [{ id: IDS.B, name: 'PC-B', kind: 'pc', address: '127.0.0.1', port: pcs.B.port, paired: true, online: true }]);
+  assert.deepEqual(list.json.peers, [{ id: IDS.B, name: 'PC-B', kind: 'pc', address: '127.0.0.1', port: pcs.B.port, paired: true, online: true, via: 'lan', relay: false }]);
   const text = JSON.stringify(list.json);
   assert.ok(!text.includes(aSide.sendKey) && !text.includes('BEGIN CERTIFICATE'), '화면에는 키와 인증서를 보내지 않는다');
 
@@ -245,7 +245,7 @@ test('연결된 PC로 보낸 파일·텍스트는 상대 PC의 받은 폴더와 
   const lastModified = Date.UTC(2025, 2, 3, 4, 5, 6);
   const res = await postBytes(pcs.A, `/api/peers/${IDS.B}/upload?name=${encodeURIComponent('회의록.pdf')}&lastModified=${lastModified}`, 'PDFDATA');
   assert.equal(res.status, 201);
-  assert.deepEqual(res.json, { ok: true, to: 'PC-B' });
+  assert.deepEqual(res.json, { ok: true, to: 'PC-B', via: 'lan' });
 
   const saved = path.join(pcs.B.receivedDir, '회의록.pdf');
   assert.equal(fs.readFileSync(saved, 'utf8'), 'PDFDATA');

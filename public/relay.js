@@ -140,9 +140,19 @@ export class SecureSocket {
     const theirNonce = fromHex(msg.n);
     if (theirNonce.length !== 16) throw new Error('잘못된 인사');
     if (this.role === 'pc') {
+      // 휴대폰은 QR의 비밀 열쇠를, 연결된 다른 PC는 자기 번호(kid)를 밝히고 그 PC와 나눠 가진 열쇠를 쓴다
+      const secret = typeof this.secret === 'function' ? this.secret(msg) : this.secret;
+      if (!secret) {
+        try {
+          this.ws.send(JSON.stringify({ t: 'error', code: 'unknown-peer', message: '이 PC와 연결이 해제됐어요. 다시 연결해 주세요.' }));
+        } catch {
+          // 이미 닫힘
+        }
+        throw Object.assign(new Error('모르는 기기예요'), { code: 'UNKNOWN_PEER' });
+      }
       this.myNonce = randomBytes(16);
       this.ws.send(JSON.stringify({ t: 'hello', v: 1, n: toHex(this.myNonce) }));
-      this.keys = await deriveKeys(this.secret, theirNonce, this.myNonce);
+      this.keys = await deriveKeys(secret, theirNonce, this.myNonce);
       this.hello = msg;
     } else {
       this.keys = await deriveKeys(this.secret, this.myNonce, theirNonce);
@@ -210,7 +220,7 @@ export class SecureSocket {
  *   const res = await pc.request('GET', '/api/session');  →  { status, headers, json(), text(), blob() }
  */
 export class RelayClient {
-  static async connect(url, secret, { WebSocketImpl = globalThis.WebSocket, device = '', onClose } = {}) {
+  static async connect(url, secret, { WebSocketImpl = globalThis.WebSocket, device = '', kid = null, onClose } = {}) {
     const ws = new WebSocketImpl(url);
     await new Promise((resolve, reject) => {
       ws.onopen = resolve;
@@ -229,7 +239,7 @@ export class RelayClient {
         onClose?.(err);
       },
     });
-    await client.socket.start({ device });
+    await client.socket.start({ device, ...(kid ? { kid } : {}) }); // kid: 연결된 다른 PC가 보낼 때 자기 번호
     return client;
   }
 
@@ -256,7 +266,7 @@ export class RelayClient {
   /**
    * @param {object} [options]
    * @param {Record<string,string>} [options.headers]
-   * @param {Blob|Uint8Array|string|null} [options.body]
+   * @param {Blob|Uint8Array|string|AsyncIterable<Uint8Array>|null} [options.body]  흘려보내는 본문(AsyncIterable)이면 headers에 content-length를 넣어야 한다
    * @param {(sent: number) => void} [options.onUploadProgress]
    * @param {(chunk: Uint8Array) => void} [options.onChunk]  있으면 응답을 모으지 않고 조각마다 넘긴다 (실시간 알림용)
    * @param {AbortSignal} [options.signal]
@@ -275,20 +285,42 @@ export class RelayClient {
     };
     signal?.addEventListener('abort', cancel, { once: true });
 
-    const bytes = typeof body === 'string' ? new TextEncoder().encode(body) : body;
+    // 흘려보내는 본문 (Node의 요청 스트림 등): 받는 대로 조각내 보낸다
+    const streaming = body !== null && typeof body === 'object' && !(body instanceof Uint8Array) && typeof body.arrayBuffer !== 'function' && typeof body[Symbol.asyncIterator] === 'function';
+    const bytes = typeof body === 'string' ? new TextEncoder().encode(body) : streaming ? null : body;
     const size = bytes ? (bytes.size ?? bytes.byteLength) : 0;
     const allHeaders = { ...headers };
     if (bytes) allHeaders['content-length'] = String(size);
     await this.socket.send(FRAME.REQ_HEAD, id, { method, path, headers: allHeaders });
-    if (bytes) {
-      for (let offset = 0; offset < size; offset += CHUNK) {
-        if (!this.streams.has(id)) break;
-        const piece = bytes.slice(offset, Math.min(size, offset + CHUNK));
-        const data = piece instanceof Uint8Array ? piece : new Uint8Array(await piece.arrayBuffer());
-        await this.socket.send(FRAME.REQ_DATA, id, data);
-        await this.socket.drain();
-        onUploadProgress?.(Math.min(size, offset + data.length));
+    try {
+      if (streaming) {
+        let sent = 0;
+        // for await를 쓰지 않는다: 중간에 멈출 때 본문 스트림을 없애 버리면, 보낸 쪽에 거절 이유를 답할 수 없다
+        const chunks = body[Symbol.asyncIterator]();
+        for (;;) {
+          const { value: chunk, done } = await chunks.next();
+          if (done || !this.streams.has(id)) break;
+          for (let at = 0; at < chunk.length; at += CHUNK) {
+            const data = chunk.subarray(at, at + CHUNK);
+            await this.socket.send(FRAME.REQ_DATA, id, data);
+            await this.socket.drain();
+            sent += data.length;
+            onUploadProgress?.(sent);
+          }
+        }
+      } else if (bytes) {
+        for (let offset = 0; offset < size; offset += CHUNK) {
+          if (!this.streams.has(id)) break;
+          const piece = bytes.slice(offset, Math.min(size, offset + CHUNK));
+          const data = piece instanceof Uint8Array ? piece : new Uint8Array(await piece.arrayBuffer());
+          await this.socket.send(FRAME.REQ_DATA, id, data);
+          await this.socket.drain();
+          onUploadProgress?.(Math.min(size, offset + data.length));
+        }
       }
+    } catch (err) {
+      cancel(); // 보내던 본문이 끊겼다 (보내는 쪽에서 취소 등): 받는 쪽도 그만두게 한다
+      throw err;
     }
     if (this.streams.has(id)) await this.socket.send(FRAME.REQ_END, id, {});
     return stream.response;

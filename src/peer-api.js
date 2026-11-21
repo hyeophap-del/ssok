@@ -10,20 +10,26 @@
 //   3. 허용하면 B는 A를 저장하고 자기 키를 돌려준다. A도 B를 저장한다.
 // 그 뒤로는 서로 받은 키(Authorization: Bearer)로 상대의 /api/upload, /api/text 를 쓴다.
 // 휴대폰 앱도 같은 순서로 연결한다. 앱은 서버가 아니므로 인증서 대신 앱 고유 번호를 신원으로 쓴다.
+//
+// 어디서나(중계 서버): 연결할 때 서로의 중계 서버 주소도 알려 둔다. 같은 네트워크에서 상대가 안 보이면
+// 상대의 중계 서버를 거쳐 보낸다. 통로는 나눠 가진 키에서 만든 열쇠로 종단간 암호화한다 (public/relay.js).
 import https from 'node:https';
 import { sendJson, sendEmpty, rejectBody, readJson, plainAddress } from './http.js';
 import { APP_NAME, APP_ID } from './brand.js';
 import { fingerprintOf, isValidCert, pinnedTlsOptions } from './tls.js';
+import { RelayClient } from '../public/relay.js';
 import {
   NONCE,
   PEER_ID,
   cleanName,
+  cleanRelayUrl,
   isValidKey,
   isValidPort,
   newNonce,
   newPeerKey,
   pairCode,
   parseAddress,
+  peerRelaySecret,
   pingApp,
   requestJson,
   sha256,
@@ -31,6 +37,8 @@ import {
 
 const COMMIT = /^[0-9a-f]{64}$/;
 const COMMIT_TIMEOUT_MS = 15_000; // 1단계 뒤 2단계가 이 시간 안에 오지 않으면 요청을 버린다
+const INFO_INTERVAL_MS = 5 * 60_000; // 같은 네트워크의 연결된 PC에게 중계 서버 주소가 바뀌었는지 묻는 간격
+const CHANNEL_IDLE_MS = 60_000; // 중계 통로를 쓰지 않으면 이 시간 뒤에 닫는다
 
 /**
  * @param {object} options
@@ -43,6 +51,8 @@ const COMMIT_TIMEOUT_MS = 15_000; // 1단계 뒤 2단계가 이 시간 안에 �
  * @param {() => void} [options.announce]           주변 PC 다시 찾기
  * @param {number} [options.pairTimeoutMs]     연결 요청을 기다리는 시간
  * @param {number} [options.verifyCooldownMs]  같은 PC의 새 주소를 다시 확인하기까지 기다리는 시간
+ * @param {() => string|null} [options.relayUrl]  이 PC가 쓰는 중계 서버 주소 (연결된 PC에게 알려 준다)
+ * @param {boolean} [options.allowLocalRelay]    시험용: http://127.0.0.1 중계 서버 주소도 받는다
  * @param {(type: string, payload?: any) => void} [options.log]
  */
 export function createPeerApi({
@@ -55,10 +65,16 @@ export function createPeerApi({
   announce = () => {},
   pairTimeoutMs = 60_000,
   verifyCooldownMs = 10_000,
+  relayUrl = () => null,
+  allowLocalRelay = false,
   log = () => {},
 }) {
   let pending = null; // 이 PC에 들어온 연결 요청 (한 번에 하나)
   const lastVerify = new Map();
+  const infoAt = new Map(); // 연결된 PC → 그 PC의 중계 서버 주소를 마지막으로 물어본 때
+  const channels = new Map(); // 연결된 PC → 그 PC의 중계 서버를 거친 암호화 통로 (잠깐 열어 두고 다시 쓴다)
+  const cleanRelay = (value) => cleanRelayUrl(value, { allowLocal: allowLocalRelay });
+  const myRelay = () => cleanRelay(relayUrl());
 
   const changed = () => broadcastHost('peers', { peers: book.list() });
   const publicRequest = (p) =>
@@ -71,14 +87,16 @@ export function createPeerApi({
   /**
    * Authorization: Bearer 키로 온 요청이면 그 기기를 돌려준다. 키가 틀렸으면 null, 키가 없으면 undefined.
    */
-  function authenticate(req) {
+  function authenticate(req, { viaRelay = false } = {}) {
     const key = /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1];
     if (key === undefined) return undefined;
     // 키는 암호화된 연결로만 받는다. 평문으로 오갔다면 같은 Wi-Fi에서 엿봤을 수 있다.
-    if (!req.socket.encrypted) return null;
+    // 중계로 온 요청은 종단간 암호화된 통로를 지나 이 PC 안에서 전달된 것이다 (src/relay-client.js).
+    if (!req.socket.encrypted && !viaRelay) return null;
     const peer = book.byKey(key);
     if (!peer) return null;
-    if (peer.kind === 'pc') {
+    // 중계로 온 요청의 출발 주소는 이 PC 자신이라 주소를 옮기지 않는다
+    if (peer.kind === 'pc' && !viaRelay) {
       // 키를 가진 진짜 그 PC가 보낸 요청이므로 주소가 바뀌었으면 새 주소를 믿어도 된다
       const address = plainAddress(req.socket.remoteAddress);
       const port = Number(req.headers['x-app-port']);
@@ -141,6 +159,7 @@ export function createPeerApi({
       port: kind === 'pc' ? body.port : null,
       cert: kind === 'pc' ? body.cert : null,
       key: kind === 'pc' ? body.key : null,
+      relay: kind === 'pc' ? cleanRelay(body.relay) : null, // 그 PC가 쓰는 중계 서버 (없으면 null)
       commit: body.commit,
       nb: newNonce(),
     };
@@ -188,12 +207,13 @@ export function createPeerApi({
 
     if (decision === 'accept') {
       const recvKey = newPeerKey();
-      const { id, name, kind, address, port, cert, key } = request;
-      book.pair({ id, name, kind, address, port, cert, sendKey: key, recvKey });
+      const { id, name, kind, address, port, cert, key, relay } = request;
+      book.pair({ id, name, kind, address, port, cert, sendKey: key, recvKey, relay });
       if (kind === 'pc') book.saw({ id, name, address, port });
+      if (kind === 'pc') infoAt.set(id, Date.now());
       changed();
       log('paired', name);
-      return sendJson(res, 200, { key: recvKey });
+      return sendJson(res, 200, { key: recvKey, ...(kind === 'pc' ? { relay: myRelay() } : {}) });
     }
     if (decision === 'deny') return sendJson(res, 403, { error: '상대 기기에서 거절했어요.' });
     if (decision === 'timeout') return sendJson(res, 408, { error: '상대 기기에서 응답이 없어요.' });
@@ -217,6 +237,16 @@ export function createPeerApi({
       changed();
       log('unpaired', ctx.peer.name);
       sendEmpty(res);
+      return true;
+    }
+
+    // 연결된 PC가 이 PC의 중계 서버 주소를 물어볼 때 (설정을 바꿨을 수 있어서 가끔 묻는다)
+    if (pathname === '/api/peer/info' && method === 'GET') {
+      if (ctx.peer?.kind !== 'pc') {
+        sendJson(res, 403, { error: '연결된 PC만 할 수 있어요.' });
+        return true;
+      }
+      sendJson(res, 200, { id: self().id, name: self().name, relay: myRelay() });
       return true;
     }
 
@@ -269,9 +299,12 @@ export function createPeerApi({
       }
       changed();
       log('unpaired', peer.name);
-      // 상대 PC에도 알린다. 꺼져 있으면 다음에 보낼 때 상대가 알아서 거절한다.
+      // 상대 PC에도 알린다 (같은 네트워크에 없으면 중계 서버로). 꺼져 있으면 다음에 보낼 때 상대가 알아서 거절한다.
       if (peer.kind === 'pc') {
-        requestJson(peer, { method: 'POST', path: '/api/peer/unpair', headers: peerHeaders(peer), pin: peer.cert, timeout: 3000 }).catch(() => {});
+        requestJson(peer, { method: 'POST', path: '/api/peer/unpair', headers: peerHeaders(peer), pin: peer.cert, timeout: 3000 })
+          .catch(() => peer.relay && relayRequest(peer, 'POST', '/api/peer/unpair', { 'x-requested-with': APP_ID }))
+          .catch(() => {})
+          .finally(() => closeChannel(peer.id));
       }
       sendEmpty(res);
       return true;
@@ -326,7 +359,7 @@ export function createPeerApi({
       first = await requestJson(target, {
         method: 'POST',
         path: '/api/pair/start',
-        body: { id: me.id, name: me.name, kind: 'pc', port: me.port, cert: identity.cert, key: recvKey, commit: sha256(na) },
+        body: { id: me.id, name: me.name, kind: 'pc', port: me.port, cert: identity.cert, key: recvKey, commit: sha256(na), relay: myRelay() },
         timeout: 8000,
       });
     } catch {
@@ -347,8 +380,9 @@ export function createPeerApi({
       .then(({ status, json }) => {
         if (status === 200 && isValidKey(json?.key)) {
           const name = cleanName(first.json.name) || target.name;
-          book.pair({ id, name, kind: 'pc', address: target.address, port: target.port, cert: peerCert, sendKey: json.key, recvKey });
+          book.pair({ id, name, kind: 'pc', address: target.address, port: target.port, cert: peerCert, sendKey: json.key, recvKey, relay: cleanRelay(json.relay) });
           book.saw({ id, name, address: target.address, port: target.port });
+          infoAt.set(id, Date.now());
           log('paired', name);
           return { id, ok: true, name };
         }
@@ -389,6 +423,58 @@ export function createPeerApi({
       targetPath = `/api/upload?${params}`;
     }
 
+    const contentType = kind === 'text' ? 'application/json' : 'application/octet-stream';
+    // 같은 네트워크에서 안 보이면 중계 서버로 보낸다. 목록이 아직 확인 전일 수 있어 잠깐 직접 확인해 본다.
+    let viaRelay = false;
+    if (!book.isOnline(peer.id) && peer.relay) {
+      const pong = await pingApp(peer, { pin: peer.cert, timeout: 1200 });
+      if (pong?.id === peer.id) book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port });
+      else viaRelay = true;
+    }
+    const result = viaRelay
+      ? await sendViaRelay(req, res, peer, targetPath, length, contentType)
+      : await sendDirect(req, res, peer, targetPath, length, contentType);
+    if (res.destroyed) return;
+    // 상대가 도중에 거절했으면 아직 들어오는 본문을 더 받지 않는다
+    if (!req.complete) {
+      req.unpipe();
+      rejectBody(req, res);
+    }
+
+    if (result.error) {
+      if (result.error.code === 'UNKNOWN_PEER') {
+        // 상대 PC에서 연결을 해제했다 (중계로 보내려다 알게 됨)
+        book.unpair(peer.id);
+        closeChannel(peer.id);
+        changed();
+        return sendJson(res, 409, { error: `${peer.name}에서 연결이 해제됐어요. 다시 연결해 주세요.` });
+      }
+      if (viaRelay ? book.lostRelay(peer.id) : book.lost(peer.id)) changed();
+      announce();
+      return sendJson(res, 502, {
+        error: viaRelay
+          ? `${peer.name}에 보내지 못했어요. 그 PC에서 ${APP_NAME}이(가) 켜져 있고 어디서나(중계 서버)에 연결되어 있는지 확인해 주세요.`
+          : `${peer.name}에 보내지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.`,
+      });
+    }
+    if (result.status === 401) {
+      // 상대 PC에서 연결을 해제했다
+      book.unpair(peer.id);
+      closeChannel(peer.id);
+      changed();
+      return sendJson(res, 409, { error: `${peer.name}에서 연결이 해제됐어요. 다시 연결해 주세요.` });
+    }
+    if (result.status < 200 || result.status >= 300) {
+      return sendJson(res, result.status, { error: `${peer.name}: ${result.json?.error || '보내지 못했어요.'}` });
+    }
+    const seen = viaRelay ? book.sawRelay(peer.id) : book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port });
+    if (seen) changed();
+    log('peer-sent', { to: viaRelay ? `${peer.name} (어디서나)` : peer.name, item: result.json });
+    return sendJson(res, 201, { ok: true, to: peer.name, via: viaRelay ? 'relay' : 'lan' });
+  }
+
+  /** 같은 네트워크에서 상대 PC에 바로 보낸다 (HTTPS, 저장해 둔 인증서로 고정) */
+  function sendDirect(req, res, peer, targetPath, length, contentType) {
     const out = https.request({
       host: peer.address,
       port: peer.port,
@@ -398,7 +484,7 @@ export function createPeerApi({
       ...pinnedTlsOptions(peer.cert),
       headers: {
         'Content-Length': length,
-        'Content-Type': kind === 'text' ? 'application/json' : 'application/octet-stream',
+        'Content-Type': contentType,
         'X-Requested-With': APP_ID,
         ...peerHeaders(peer),
       },
@@ -430,32 +516,92 @@ export function createPeerApi({
     });
     req.on('error', () => out.destroy());
     req.pipe(out);
+    return outcome;
+  }
 
-    const result = await outcome;
-    if (res.destroyed) return;
-    // 상대가 도중에 거절했으면 아직 들어오는 본문을 더 받지 않는다
-    if (!req.complete) {
-      req.unpipe(out);
-      rejectBody(req, res);
+  /** 상대 PC의 중계 서버를 거쳐 보낸다 (종단간 암호화된 통로, 받는 대로 흘려보낸다) */
+  async function sendViaRelay(req, res, peer, targetPath, length, contentType) {
+    const controller = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) controller.abort();
+    });
+    try {
+      return await relayRequest(peer, 'POST', targetPath, { 'content-type': contentType, 'content-length': String(length), 'x-requested-with': APP_ID }, { body: req, signal: controller.signal });
+    } catch (error) {
+      return { error };
     }
+  }
 
-    if (result.error) {
-      if (book.lost(peer.id)) changed();
-      announce();
-      return sendJson(res, 502, { error: `${peer.name}에 보내지 못했어요. 그 PC에서 ${APP_NAME} 프로그램이 켜져 있는지 확인해 주세요.` });
+  // ---- 중계 서버를 거친 통로 ----
+
+  /** 그 PC로 가는 통로 (열려 있으면 다시 쓴다) */
+  function relayChannel(peer) {
+    let entry = channels.get(peer.id);
+    if (entry && entry.relay === peer.relay && entry.key === peer.sendKey) return entry;
+    closeChannel(peer.id);
+    entry = { relay: peer.relay, key: peer.sendKey, active: 0, timer: null };
+    const url = `${peer.relay.replace(/^http/, 'ws')}/ws/c/${peer.id}`;
+    const forget = () => {
+      if (channels.get(peer.id) === entry) channels.delete(peer.id);
+      clearTimeout(entry.timer);
+    };
+    entry.client = RelayClient.connect(url, peerRelaySecret(peer.sendKey), { kid: self().id, device: self().name, onClose: forget });
+    entry.client.catch(forget);
+    channels.set(peer.id, entry);
+    return entry;
+  }
+
+  function closeChannel(id) {
+    const entry = channels.get(id);
+    if (!entry) return;
+    channels.delete(id);
+    clearTimeout(entry.timer);
+    entry.client.then((c) => c.close(), () => {});
+  }
+
+  /** 중계 통로로 요청 하나를 보내고 JSON 응답을 받는다. 쓰는 동안에는 통로를 닫지 않는다. */
+  async function relayRequest(peer, method, path, headers = {}, { body = null, signal } = {}) {
+    const entry = relayChannel(peer);
+    entry.active++;
+    clearTimeout(entry.timer);
+    try {
+      const client = await entry.client;
+      const response = await client.request(method, path, { headers, body, signal });
+      let json = null;
+      try {
+        json = await response.json();
+      } catch {
+        // JSON이 아닌 응답
+      }
+      return { status: response.status, json };
+    } finally {
+      entry.active--;
+      if (entry.active === 0 && channels.get(peer.id) === entry) {
+        entry.timer = setTimeout(() => closeChannel(peer.id), CHANNEL_IDLE_MS);
+        entry.timer.unref?.();
+      }
     }
-    if (result.status === 401) {
-      // 상대 PC에서 연결을 해제했다
-      book.unpair(peer.id);
-      changed();
-      return sendJson(res, 409, { error: `${peer.name}에서 연결이 해제됐어요. 다시 연결해 주세요.` });
+  }
+
+  /** 그 PC가 지금 자기 중계 서버에 연결되어 있는지 */
+  async function relayOnline(peer) {
+    try {
+      const res = await fetch(`${peer.relay}/api/online/${peer.id}`, { signal: AbortSignal.timeout(5000) });
+      return res.ok && (await res.json()).online === true;
+    } catch {
+      return false;
     }
-    if (result.status < 200 || result.status >= 300) {
-      return sendJson(res, result.status, { error: `${peer.name}: ${result.json?.error || '보내지 못했어요.'}` });
+  }
+
+  /** 같은 네트워크에 있는 연결된 PC에게 중계 서버 주소를 묻는다 (그 PC에서 설정을 바꿨을 수 있다) */
+  async function fetchInfo(peer) {
+    infoAt.set(peer.id, Date.now());
+    try {
+      const { status, json } = await requestJson(peer, { path: '/api/peer/info', headers: peerHeaders(peer), pin: peer.cert, timeout: 3000 });
+      if (status === 200 && json?.id === peer.id) book.setRelay(peer.id, cleanRelay(json.relay));
+    } catch {
+      // 다음에 다시 묻는다
     }
-    if (book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port })) changed();
-    log('peer-sent', { to: peer.name, item: result.json });
-    return sendJson(res, 201, { ok: true, to: peer.name });
   }
 
   // ---- 상대 PC가 켜져 있는지, 주소가 바뀌었는지 ----
@@ -488,8 +634,16 @@ export function createPeerApi({
         .filter((peer) => peer.kind === 'pc')
         .map(async (peer) => {
           const info = await pingApp(peer, { pin: peer.cert });
-          if (info?.id === peer.id) book.saw({ id: peer.id, name: cleanName(info.name) || peer.name, address: peer.address, port: peer.port });
-          else book.lost(peer.id);
+          if (info?.id === peer.id) {
+            book.saw({ id: peer.id, name: cleanName(info.name) || peer.name, address: peer.address, port: peer.port });
+            book.lostRelay(peer.id);
+            if (Date.now() - (infoAt.get(peer.id) || 0) > INFO_INTERVAL_MS) await fetchInfo(peer);
+            return;
+          }
+          book.lost(peer.id);
+          // 같은 네트워크에 없으면: 그 PC의 중계 서버에 붙어 있는지 본다 (붙어 있으면 '어디서나'로 보낼 수 있다)
+          if (peer.relay && (await relayOnline(peer))) book.sawRelay(peer.id);
+          else book.lostRelay(peer.id);
         }),
     );
     if (book.signature() !== before) changed();
@@ -498,6 +652,7 @@ export function createPeerApi({
   function close() {
     if (pending?.stage === 'asking') pending.resolve('closing');
     clearTimeout(pending?.timer);
+    for (const id of [...channels.keys()]) closeChannel(id);
   }
 
   return { authenticate, handlePublic, handle, snapshot, discovered, refresh, close };

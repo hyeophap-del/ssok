@@ -351,6 +351,7 @@ p { margin: 0; }
 .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
 .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 .chip[aria-pressed="true"] .icon { color: var(--accent); }
+.chip-dot.relay { background: var(--accent); } /* 중계 서버를 거쳐 보낼 수 있음 */
 .chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); flex: none; }
 .chip-dot.off { background: var(--muted); opacity: 0.5; }
 .chip.add { background: transparent; border-style: dashed; color: var(--muted); }

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp, newToken, isPartialUpload, VERSION } from './src/app.js';
 import { Store } from './src/store.js';
 import { lanAddresses, broadcastAddresses, tailscaleAddress } from './src/net.js';
-import { PeerBook, newPeerId, cleanName, pingApp } from './src/peers.js';
+import { PeerBook, newPeerId, cleanName, pingApp, peerRelaySecret } from './src/peers.js';
 import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME, REPO } from './src/brand.js';
 import { startDiscovery } from './src/discovery.js';
 import { loadIdentity } from './src/tls.js';
@@ -459,6 +459,11 @@ async function main() {
       localPort: port,
       cookie: `${APP_ID}=${config.token}`,
       relayKey,
+      // 연결된 다른 PC가 집 밖에서 중계로 보낼 때: 그 PC와 나눠 가진 키로 통로를 열고, 그 키로 들어온 것으로 본다
+      peerLookup: (id) => {
+        const peer = peerBook.getPaired(id);
+        return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
+      },
       log: logEvent,
       onStatus: (status) => {
         relayStatus = status;
@@ -505,6 +510,7 @@ async function main() {
     tailscaleAddress: () => (localOnly ? null : tailscaleAddress()),
     relayKey,
     relayInfo: () => relayInfo(),
+    relayUrl: () => (localOnly ? null : (config.relay?.url ?? null)),
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self,

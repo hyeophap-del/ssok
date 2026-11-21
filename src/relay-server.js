@@ -115,8 +115,11 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     const url = new URL(req.url, 'http://relay');
+    let m;
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendText(res, 405, 'Method Not Allowed');
     if (url.pathname === '/api/ping') return sendJson(res, 200, { app: `${APP_ID}-relay`, version });
+    // 연결된 다른 PC가 '어디서나'로 보낼 수 있는지(그 PC가 지금 이 중계 서버에 붙어 있는지) 확인할 때
+    if ((m = /^\/api\/online\/([0-9a-f]{16})$/.exec(url.pathname))) return sendJson(res, 200, { online: online.has(m[1]) });
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(
@@ -125,7 +128,6 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
           `<p>PC의 ${APP_NAME} 화면에 있는 <b>[어디서나]</b> QR 코드를 휴대폰으로 스캔하세요.</p></body>`,
       );
     }
-    let m;
     if ((m = /^\/p\/([0-9a-f]{16})\/?$/.exec(url.pathname))) return servePage(req, res, 'index.html', m[1]);
     if ((m = /^\/p\/([0-9a-f]{16})\/manifest\.webmanifest$/.exec(url.pathname))) return serveManifest(res, m[1]);
     const name = url.pathname.slice(1);
