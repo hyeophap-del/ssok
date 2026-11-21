@@ -1,18 +1,18 @@
-// 홈페이지 첫 화면: 설치 없이 두 브라우저가 같은 방(6자리 코드)에 들어와 주고받는다.
-// 중계 서버는 두 브라우저를 이어 주기만 하고, 내용은 두 브라우저가 그 자리에서 만든 열쇠(ECDH)로 암호화한다.
-//   방을 만든 쪽 = 'pc' 역할, 들어온 쪽 = 'phone' 역할 (relay.js의 SecureSocket은 인사를 먼저 보내는 쪽이 정해져 있다)
-import { SecureSocket, FRAME, CHUNK } from './relay.js';
+// 홈페이지 첫 화면: 설치 없이 여러 기기(최대 10대)가 같은 방(6자리 코드)에 모여 주고받는다.
+// 방의 약속(방 열쇠 건네기, 암호화, 받는 사람 지정)은 room-core.js에 있다.
+import { FRAME, CHUNK } from './relay.js';
+import { RoomPeer } from './room-core.js';
 
 const $ = (id) => document.getElementById(id);
 const SVG = 'http://www.w3.org/2000/svg';
 const VIEWS = ['pin-view', 'home-view', 'wait-view', 'session-view', 'notice-view'];
 const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/room`;
 
-let ws = null;
-let secure = null;
+let peer = null;
+let target = 0; // 0 = 모두, 아니면 그 기기 번호
 let nextId = 1;
-const outgoing = new Map(); // 보내는 중: id → { abort, row }
-const incoming = new Map(); // 받는 중: id → { name, size, type, chunks, received, row }
+const outgoing = new Map(); // 보내는 중: 번호 → { abort, view, update, expected, done }
+const incoming = new Map(); // 받는 중: '보낸 기기:번호' → { name, size, type, chunks, received, view, update, from }
 let sending = Promise.resolve(); // 보낼 파일은 하나씩 차례로
 
 // ---- 화면 도구 ----
@@ -63,7 +63,7 @@ function formatSize(bytes) {
   return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[i]}`;
 }
 
-/** 상대 화면에 보일 이 기기 이름 */
+/** 다른 기기 화면에 보일 이 기기 이름 */
 function deviceName() {
   const ua = navigator.userAgent;
   if (/iPhone/.test(ua)) return 'iPhone';
@@ -73,6 +73,20 @@ function deviceName() {
   if (/Macintosh/.test(ua)) return 'Mac';
   return '다른 기기';
 }
+
+/** 화면에 보일 기기 이름: 같은 이름이 여럿이면 들어온 순서대로 'iPhone 2'처럼 번호를 붙인다 */
+function displayNames() {
+  const names = new Map();
+  const seen = new Map();
+  for (const m of peer ? peer.memberList() : []) {
+    const count = (seen.get(m.device) ?? 0) + 1;
+    seen.set(m.device, count);
+    names.set(m.id, count > 1 ? `${m.device} ${count}` : m.device);
+  }
+  return names;
+}
+const nameOf = (id) => displayNames().get(id) ?? '나간 기기';
+const others = () => (peer ? peer.memberList().filter((m) => !m.me).map((m) => ({ ...m, device: nameOf(m.id) })) : []);
 
 function notice(title, text) {
   closeRoom();
@@ -139,54 +153,89 @@ $('pin-input').addEventListener('input', () => {
 
 // ---- 방 만들기·들어가기 ----
 function closeRoom() {
-  try {
-    ws?.close();
-  } catch {
-    // 이미 닫힘
-  }
-  ws = null;
-  secure = null;
+  const old = peer;
+  peer = null;
+  old?.close();
+  target = 0;
   for (const out of outgoing.values()) out.abort = true;
   outgoing.clear();
   incoming.clear();
+  $('log').replaceChildren();
+  $('log-card').hidden = true;
+  $('invite-box').hidden = true;
 }
 
-function openRoom(first, isHost) {
+async function openRoom(options) {
   closeRoom();
-  const socket = new WebSocket(wsUrl);
-  ws = socket;
-  let joined = false;
-  socket.onopen = () => socket.send(JSON.stringify({ ...first, device: deviceName() }));
-  socket.onmessage = (event) => {
-    if (typeof event.data !== 'string') return;
-    let msg;
-    try {
-      msg = JSON.parse(event.data);
-    } catch {
-      return;
+  setStatus('connecting', options.create ? '방을 만드는 중…' : '들어가는 중…');
+  let room;
+  try {
+    room = await RoomPeer.open(wsUrl, { ...options, device: deviceName() });
+  } catch (err) {
+    if (err.code === 'CONNECT' || err.code === 'CLOSED') return notice('연결하지 못했어요', '암호가 바뀌었을 수 있어요. 새로 고쳐 다시 해 주세요.');
+    return notice(err.code === 'no-room' ? '방을 찾지 못했어요' : '방에 들어가지 못했어요', err.message);
+  }
+  peer = room;
+  room.onMembers = (list, change) => {
+    if (peer !== room) return;
+    if (change?.joined) toast(`${nameOf(change.joined.id)}이(가) 들어왔어요.`);
+    if (change?.left) {
+      toast(`${change.left.device}이(가) 나갔어요.`);
+      if (target === change.left.id) target = 0;
+      for (const [key, entry] of incoming) {
+        if (entry.from === change.left.id) {
+          incoming.delete(key);
+          entry.view.dir.textContent = '보내던 기기가 나감';
+        }
+      }
     }
-    if (msg.t === 'room') {
-      show('wait-view');
-      $('room-code').textContent = `${msg.code.slice(0, 3)} ${msg.code.slice(3)}`;
-      $('room-qr').innerHTML = msg.qrSvg; // 중계 서버가 만든 SVG
-      $('room-host').textContent = location.host;
-      setStatus('waiting', '상대를 기다리는 중');
-    } else if (msg.t === 'joined') {
-      joined = true;
-      connected(socket, msg.peer, isHost); // 이 처리 안에서 바로 암호 통로를 붙인다 (다음 메시지부터는 통로가 받는다)
-    } else if (msg.t === 'error') {
-      notice(msg.code === 'no-room' ? '방을 찾지 못했어요' : '방에 들어가지 못했어요', msg.message || '');
-    }
+    renderRoom();
   };
-  socket.onclose = (event) => {
-    if (ws !== socket) return;
-    if (event.code === 1006 && !joined) return notice('연결하지 못했어요', '암호가 바뀌었을 수 있어요. 새로 고쳐 다시 해 주세요.');
-    if (!joined) return;
-    notice('상대가 나갔어요', '다시 주고받으려면 새로 시작하세요.');
+  room.onFrame = (from, type, id, payload) => peer === room && onFrame(from, type, id, payload);
+  room.onClose = () => {
+    if (peer === room) notice('연결이 끊겼어요', '다시 주고받으려면 새로 시작하세요.');
   };
+  for (const [id, code, host] of [['room-code', 'room-qr', 'room-host'], ['invite-code', 'invite-qr', 'invite-host']]) {
+    $(id).textContent = `${room.code.slice(0, 3)} ${room.code.slice(3)}`;
+    $(code).innerHTML = room.qrSvg; // 중계 서버가 만든 SVG
+    $(host).textContent = location.host;
+  }
+  room.keyed.then(() => peer === room && renderRoom());
+  renderRoom();
 }
 
-$('create').addEventListener('click', () => openRoom({ t: 'create' }, true));
+/** 방 화면: 혼자면 코드를 보여 주며 기다리고, 누가 있으면 주고받는 화면 */
+function renderRoom() {
+  if (!peer) return;
+  const list = others();
+  const inSession = !$('session-view').hidden;
+  // 방을 만들고 아직 아무도 안 들어왔으면 코드를 크게 보여 주며 기다린다 (주고받다가 모두 나가면 그 화면에 그대로 둔다)
+  if (!list.length && !inSession) {
+    show('wait-view');
+    setStatus('waiting', '다른 기기를 기다리는 중');
+    return;
+  }
+  show('session-view');
+  $('peer-name').textContent = list.length ? `방 · ${list.length + 1}대` : '방 · 다른 기기를 기다리는 중';
+  $('key-wait').hidden = peer.ready;
+  setStatus(peer.ready ? 'online' : 'connecting', peer.ready ? `${list.length + 1}대 연결됨` : '방 열쇠 받는 중…');
+  const chips = [chip(0, '모두')].concat(list.map((m) => chip(m.id, m.device)));
+  $('targets').replaceChildren(...chips);
+}
+
+function chip(id, label) {
+  const button = el('button', 'chip');
+  button.type = 'button';
+  button.setAttribute('aria-pressed', String(target === id));
+  button.append(el('span', 'chip-name', label));
+  button.addEventListener('click', () => {
+    target = id;
+    renderRoom();
+  });
+  return button;
+}
+
+$('create').addEventListener('click', () => openRoom({ create: true }));
 function joinRoom(code) {
   $('home-error').hidden = true;
   if (!/^\d{6}$/.test(code)) {
@@ -194,8 +243,7 @@ function joinRoom(code) {
     $('home-error').textContent = '방 코드는 숫자 6자리예요.';
     return;
   }
-  setStatus('connecting', '들어가는 중…');
-  openRoom({ t: 'join', code }, false);
+  openRoom({ code });
 }
 $('join-form').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -206,44 +254,23 @@ $('join-code').addEventListener('input', () => {
   if (digits.length === 6) joinRoom(digits);
 });
 $('wait-cancel').addEventListener('click', goHome);
+$('invite').addEventListener('click', () => ($('invite-box').hidden = !$('invite-box').hidden));
 $('leave').addEventListener('click', () => {
   if (incoming.size && !confirm('받는 중인 파일이 있어요. 그래도 나갈까요?')) return;
   goHome();
 });
 $('notice-home').addEventListener('click', goHome);
 
-// ---- 연결됨: 암호 통로 ----
-function connected(socket, peer, isHost) {
-  const channel = new SecureSocket(socket, {
-    role: isHost ? 'pc' : 'phone',
-    secret: 'ecdh',
-    onFrame,
-    onClose: () => {
-      if (ws === socket) notice('상대가 나갔어요', '다시 주고받으려면 새로 시작하세요.');
-    },
-  });
-  secure = channel;
-  $('peer-name').textContent = `연결됨 · ${peer}`;
-  setStatus('connecting', '암호 연결 중…');
-  const ready = isHost ? channel.ready : channel.start({ device: deviceName() });
-  ready.then(
-    () => {
-      if (secure !== channel) return;
-      show('session-view');
-      setStatus('online', '연결됨');
-    },
-    (err) => notice('연결하지 못했어요', err.message),
-  );
-}
-
 // ---- 주고받은 것 목록 ----
-function addRow(direction, iconId, name) {
+function addRow(direction, iconId, name, who) {
   const row = el('li', 'xfer');
   const top = el('div', 'xfer-top');
-  const nameEl = el(iconId === 'i-text' ? 'span' : 'span', iconId === 'i-text' ? 'xfer-text' : 'xfer-name', name);
-  const dir = el('span', 'dir', direction === 'out' ? '보냄' : '받음');
+  const nameEl = el('span', iconId === 'i-text' ? 'xfer-text' : 'xfer-name', name);
+  const dir = el('span', 'dir', '');
   top.append(icon(iconId), nameEl, dir);
   row.append(top);
+  const sub = el('div', 'dir', direction === 'out' ? `→ ${who}` : `← ${who}`);
+  row.append(sub);
   $('log').prepend(row);
   $('log-card').hidden = false;
   return { row, top, dir };
@@ -260,37 +287,40 @@ function progressBar(row) {
 
 // ---- 보내기 ----
 function sendFiles(files) {
+  if (!peer?.ready) return toast('방 열쇠를 받은 뒤에 보낼 수 있어요.', 'error');
+  if (!others().length) return toast('아직 방에 다른 기기가 없어요. [더 초대]로 코드를 알려 주세요.', 'error');
   for (const file of files) {
     const id = nextId++;
-    const view = addRow('out', 'i-file', file.name || '파일');
+    const to = target;
+    const expected = to === 0 ? others().length : 1;
+    const view = addRow('out', 'i-file', file.name || '파일', to === 0 ? '모두' : nameOf(to));
     view.dir.textContent = `${formatSize(file.size)} · 기다리는 중`;
-    const update = progressBar(view.row);
-    const job = { abort: false, view, update };
+    const job = { abort: false, view, update: progressBar(view.row), expected, done: 0 };
     outgoing.set(id, job);
-    sending = sending.then(() => sendOne(id, file, job)).catch(() => {});
+    sending = sending.then(() => sendOne(id, to, file, job)).catch(() => {});
   }
 }
 
-async function sendOne(id, file, job) {
-  const channel = secure;
-  if (!channel || job.abort) return;
+async function sendOne(id, to, file, job) {
+  const room = peer;
+  if (!room || job.abort) return;
   try {
-    await channel.send(FRAME.FILE_HEAD, id, { name: file.name || '파일', size: file.size, type: file.type || '', lastModified: file.lastModified || 0 });
+    await room.send(to, FRAME.FILE_HEAD, id, { name: file.name || '파일', size: file.size, type: file.type || '', lastModified: file.lastModified || 0 });
     let done = 0;
     while (done < file.size) {
-      if (job.abort || secure !== channel) {
-        await channel.send(FRAME.FILE_CANCEL, id, {}).catch(() => {});
+      if (job.abort || peer !== room) {
+        await room.send(to, FRAME.FILE_CANCEL, id, {}).catch(() => {});
         job.view.dir.textContent = '취소됨';
         return;
       }
       const piece = new Uint8Array(await file.slice(done, done + CHUNK).arrayBuffer());
-      await channel.send(FRAME.FILE_DATA, id, piece);
-      await channel.drain();
+      await room.send(to, FRAME.FILE_DATA, id, piece);
+      await room.drain();
       done += piece.length;
       job.update(done, file.size);
       job.view.dir.textContent = `${formatSize(done)} / ${formatSize(file.size)}`;
     }
-    await channel.send(FRAME.FILE_END, id, {});
+    await room.send(to, FRAME.FILE_END, id, {});
     job.view.dir.textContent = `${formatSize(file.size)} · 보냄 (받는 중)`;
   } catch {
     job.view.dir.textContent = '보내지 못함';
@@ -299,9 +329,10 @@ async function sendOne(id, file, job) {
 }
 
 async function sendText(text) {
-  if (!secure) return;
-  await secure.send(FRAME.TEXT, nextId++, { text });
-  const view = addRow('out', 'i-text', text);
+  if (!peer?.ready) throw new Error('방 열쇠를 받은 뒤에 보낼 수 있어요.');
+  if (!others().length) throw new Error('아직 방에 다른 기기가 없어요.');
+  await peer.send(target, FRAME.TEXT, nextId++, { text });
+  const view = addRow('out', 'i-text', text, target === 0 ? '모두' : nameOf(target));
   view.dir.textContent = '보냄';
 }
 
@@ -314,43 +345,47 @@ const decodeJson = (payload) => {
   }
 };
 
-function onFrame(type, id, payload) {
+function onFrame(from, type, id, payload) {
+  const key = `${from}:${id}`;
   if (type === FRAME.FILE_HEAD) {
     const head = decodeJson(payload);
     const name = String(head.name || '파일').slice(0, 200);
     const size = Math.max(0, Number(head.size) || 0);
-    const view = addRow('in', 'i-file', name);
+    const view = addRow('in', 'i-file', name, nameOf(from));
     view.dir.textContent = `${formatSize(size)} · 받는 중`;
-    incoming.set(id, { name, size, type: String(head.type || ''), chunks: [], received: 0, view, update: progressBar(view.row) });
+    incoming.set(key, { name, size, type: String(head.type || ''), chunks: [], received: 0, view, update: progressBar(view.row), from });
     if (size > 1024 ** 3 && /Android|iPhone|iPad/.test(navigator.userAgent)) toast(`${name}: 1GB가 넘어 휴대폰에서는 받다가 멈출 수 있어요.`, 'error');
   } else if (type === FRAME.FILE_DATA) {
-    const entry = incoming.get(id);
+    const entry = incoming.get(key);
     if (!entry) return;
     entry.chunks.push(payload.slice());
     entry.received += payload.length;
     entry.update(entry.received, entry.size);
     entry.view.dir.textContent = `${formatSize(entry.received)} / ${formatSize(entry.size)}`;
   } else if (type === FRAME.FILE_END) {
-    const entry = incoming.get(id);
+    const entry = incoming.get(key);
     if (!entry) return;
-    incoming.delete(id);
+    incoming.delete(key);
     finishIncoming(entry);
-    secure?.send(FRAME.FILE_DONE, id, {}).catch(() => {});
+    peer?.send(from, FRAME.FILE_DONE, id, {}).catch(() => {});
   } else if (type === FRAME.FILE_CANCEL) {
-    const entry = incoming.get(id);
+    const entry = incoming.get(key);
     if (!entry) return;
-    incoming.delete(id);
-    entry.view.dir.textContent = '상대가 취소함';
+    incoming.delete(key);
+    entry.view.dir.textContent = '보낸 기기가 취소함';
   } else if (type === FRAME.FILE_DONE) {
     const job = outgoing.get(id);
     if (!job) return;
-    outgoing.delete(id);
-    job.view.dir.textContent = '상대가 받았어요 ✓';
-    job.view.row.querySelector('.bar')?.remove();
+    job.done += 1;
+    job.view.dir.textContent = job.expected > 1 ? `${job.done}/${job.expected}대 받음` : '받았어요 ✓';
+    if (job.done >= job.expected) {
+      outgoing.delete(id);
+      job.view.dir.textContent = job.expected > 1 ? `${job.expected}대 모두 받았어요 ✓` : '받았어요 ✓';
+      job.view.row.querySelector('.bar')?.remove();
+    }
   } else if (type === FRAME.TEXT) {
     const text = String(decodeJson(payload).text ?? '');
-    const view = addRow('in', 'i-text', text);
-    view.dir.textContent = '';
+    const view = addRow('in', 'i-text', text, nameOf(from));
     const copy = el('button', 'btn small', '복사');
     copy.type = 'button';
     copy.addEventListener('click', async () => {
@@ -362,7 +397,7 @@ function onFrame(type, id, payload) {
       }
     });
     view.top.append(copy);
-    toast('텍스트를 받았어요.');
+    toast(`${nameOf(from)}에서 텍스트를 받았어요.`);
   }
 }
 
@@ -407,8 +442,8 @@ $('text-form').addEventListener('submit', async (e) => {
     await sendText(text);
     input.value = '';
     input.style.height = 'auto';
-  } catch {
-    toast('보내지 못했어요. 연결을 확인해 주세요.', 'error');
+  } catch (err) {
+    toast(err.message || '보내지 못했어요. 연결을 확인해 주세요.', 'error');
   }
 });
 let dragDepth = 0;

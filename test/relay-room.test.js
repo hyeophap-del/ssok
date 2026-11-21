@@ -7,7 +7,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createRelayServer } from '../src/relay-server.js';
 import { WsConnection } from '../src/ws.js';
-import { SecureSocket, FRAME } from '../public/relay.js';
+import { FRAME } from '../public/relay.js';
+import { RoomPeer } from '../public/room-core.js';
 
 // 홈페이지에서 바로 주고받기: 암호(숫자 4자리)를 넣은 두 브라우저가 6자리 방 코드로 만나 종단간 암호화로 주고받는다
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -86,73 +87,77 @@ test('암호가 맞아야 들어가고, 한 곳에서 10번 틀리면 잠시 막
   assert.equal((await login('4821', attacker)).status, 429, '10번 틀린 뒤에는 맞아도 막힌다');
 });
 
+const roomUrl = () => `${base.replace('http', 'ws')}/ws/room`;
+const enter = (cookie, options) => RoomPeer.open(roomUrl(), { ...options, headers: cookie ? { cookie } : undefined });
+
+/** 받은 메시지를 모아 두는 방 기기 */
+async function member(cookie, options) {
+  const peer = await enter(cookie, options);
+  peer.got = [];
+  peer.onFrame = (from, type, id, payload) => peer.got.push({ from, type, id, payload: payload.slice() });
+  peer.changes = [];
+  peer.onMembers = (list, change) => change && peer.changes.push(change);
+  return peer;
+}
+const textsOf = (peer) => peer.got.filter((f) => f.type === FRAME.TEXT).map((f) => JSON.parse(new TextDecoder().decode(f.payload)).text);
+
 test('입장권(쿠키) 없이는 방을 만들 수 없고, 암호를 바꾸면 예전 입장권은 무효가 된다', async () => {
-  await assert.rejects(openRoom(null, { t: 'create' }));
+  await assert.rejects(enter(null, { create: true, device: 'PC' }));
   const cookie = (await login('4821')).headers.get('set-cookie').split(';')[0];
-  const { ws } = await openRoom(cookie, { t: 'create' });
-  ws.close();
+  const peer = await enter(cookie, { create: true, device: 'PC' });
+  assert.match(peer.code, /^\d{6}$/);
+  peer.close();
   relay.setWebPin('5932');
-  await assert.rejects(openRoom(cookie, { t: 'create' }), undefined, '암호를 바꾸면 다시 넣어야 한다');
+  await assert.rejects(enter(cookie, { create: true, device: 'PC' }), undefined, '암호를 바꾸면 다시 넣어야 한다');
   assert.equal((await login('4821')).status, 401);
 });
 
-test('방 코드로 만난 두 브라우저가 서로 파일·텍스트를 보낸다 (중계 서버는 내용을 볼 수 없다)', async () => {
+test('여러 기기가 한 방에서 모두에게, 또는 한 기기에게만 보낸다 (중계 서버는 내용을 볼 수 없다)', async () => {
   const cookie = (await login('5932')).headers.get('set-cookie').split(';')[0];
-  const host = await openRoom(cookie, { t: 'create', device: 'Windows PC' });
-  await waitFor(() => host.messages.some((m) => m.t === 'room'));
-  const room = host.messages.find((m) => m.t === 'room');
-  assert.match(room.code, /^\d{6}$/);
-  assert.match(room.url, new RegExp(`/#${room.code}$`));
-  assert.match(room.qrSvg, /^<svg/);
+  const pc = await member(cookie, { create: true, device: 'Windows PC' });
+  assert.match(pc.url, new RegExp(`/#${pc.code}$`));
+  assert.match(pc.qrSvg, /^<svg/);
+  await assert.rejects(enter(cookie, { code: pc.code === '000000' ? '111111' : '000000', device: 'x' }), (err) => err.code === 'no-room');
 
-  // 틀린 코드
-  const wrong = await openRoom(cookie, { t: 'join', code: room.code === '000000' ? '111111' : '000000' });
-  await waitFor(() => wrong.messages.some((m) => m.t === 'error'));
-  assert.equal(wrong.messages.find((m) => m.t === 'error').code, 'no-room');
+  const iphone = await member(cookie, { code: pc.code, device: 'iPhone' });
+  const galaxy = await member(cookie, { code: pc.code, device: 'Galaxy' });
+  await Promise.all([iphone.keyed, galaxy.keyed]); // 방 열쇠를 건네받았다
+  await waitFor(() => pc.members.size === 3 && iphone.members.size === 3);
+  assert.deepEqual(galaxy.memberList().map((m) => m.device), ['Windows PC', 'iPhone', 'Galaxy']);
 
-  // 방을 만든 쪽은 'pc', 들어온 쪽은 'phone' 역할로 암호 통로를 연다 (room.js와 같다)
-  const hostFrames = [];
-  let hostSecure;
-  host.ws.onmessage = (e) => {
-    const msg = typeof e.data === 'string' ? JSON.parse(e.data) : null;
-    if (msg?.t !== 'joined') return;
-    assert.equal(msg.peer, 'iPhone');
-    hostSecure = new SecureSocket(host.ws, { role: 'pc', secret: 'ecdh', onFrame: (type, id, payload) => hostFrames.push({ type, id, payload: payload.slice() }) });
-  };
-  const guestFrames = [];
-  const guest = await openRoom(cookie, { t: 'join', code: room.code, device: 'iPhone' });
-  await waitFor(() => guest.messages.some((m) => m.t === 'joined'));
-  assert.equal(guest.messages.find((m) => m.t === 'joined').peer, 'Windows PC');
-  const guestSecure = new SecureSocket(guest.ws, { role: 'phone', secret: 'ecdh', onFrame: (type, id, payload) => guestFrames.push({ type, id, payload: payload.slice() }) });
-  await guestSecure.start({ device: 'iPhone' });
-  await hostSecure.ready;
+  // 모두에게
+  await pc.send(0, FRAME.TEXT, 1, { text: `${MARKER}모두 안녕` });
+  await waitFor(() => textsOf(iphone).length && textsOf(galaxy).length);
+  assert.deepEqual(textsOf(iphone), [`${MARKER}모두 안녕`]);
+  assert.equal(iphone.got[0].from, pc.you, '보낸 기기 번호는 중계 서버가 붙인다');
 
-  // 휴대폰 → PC: 파일
-  const photo = Buffer.concat([Buffer.from(MARKER), crypto.randomBytes(200_000)]);
-  await guestSecure.send(FRAME.FILE_HEAD, 1, { name: '사진.jpg', size: photo.length, type: 'image/jpeg' });
-  for (let at = 0; at < photo.length; at += 64 * 1024) await guestSecure.send(FRAME.FILE_DATA, 1, photo.subarray(at, at + 64 * 1024));
-  await guestSecure.send(FRAME.FILE_END, 1, {});
-  await waitFor(() => hostFrames.some((f) => f.type === FRAME.FILE_END));
-  const head = JSON.parse(new TextDecoder().decode(hostFrames.find((f) => f.type === FRAME.FILE_HEAD).payload));
-  assert.equal(head.name, '사진.jpg');
-  const received = Buffer.concat(hostFrames.filter((f) => f.type === FRAME.FILE_DATA).map((f) => f.payload));
-  assert.deepEqual(received, photo);
-
-  // PC → 휴대폰: 텍스트 (양쪽 모두 보낼 수 있다)
-  await hostSecure.send(FRAME.TEXT, 1, { text: `${MARKER}안녕` });
-  await waitFor(() => guestFrames.some((f) => f.type === FRAME.TEXT));
-  assert.equal(JSON.parse(new TextDecoder().decode(guestFrames.find((f) => f.type === FRAME.TEXT).payload)).text, `${MARKER}안녕`);
-
-  // 방은 두 사람만: 같은 코드로 또 들어올 수 없다
-  const third = await openRoom(cookie, { t: 'join', code: room.code });
-  await waitFor(() => third.messages.some((m) => m.t === 'error'));
+  // 한 기기에게만: 아이폰 → PC로 파일
+  const photo = Buffer.concat([Buffer.from(MARKER), crypto.randomBytes(150_000)]);
+  await iphone.send(pc.you, FRAME.FILE_HEAD, 7, { name: '사진.jpg', size: photo.length, type: 'image/jpeg' });
+  for (let at = 0; at < photo.length; at += 64 * 1024) await iphone.send(pc.you, FRAME.FILE_DATA, 7, photo.subarray(at, at + 64 * 1024));
+  await iphone.send(pc.you, FRAME.FILE_END, 7, {});
+  await waitFor(() => pc.got.some((f) => f.type === FRAME.FILE_END));
+  assert.deepEqual(Buffer.concat(pc.got.filter((f) => f.type === FRAME.FILE_DATA).map((f) => f.payload)), photo);
+  assert.equal(galaxy.got.some((f) => f.type === FRAME.FILE_DATA), false, '고르지 않은 기기에는 가지 않는다');
 
   assert.equal(Buffer.concat(relayed).includes(Buffer.from(MARKER)), false, '중계 서버를 지나간 바이트에 내용이 보이면 안 된다');
-  assert.ok(relay.webOverview().bytes > 200_000, '주고받은 양을 센다');
-  assert.equal(relay.webOverview().connected, 1);
+  assert.equal(relay.webOverview().connected, 3);
 
-  // 한쪽이 나가면 다른 쪽도 끝난다
-  const closed = new Promise((r) => guest.ws.addEventListener('close', r));
-  host.ws.close();
-  await closed;
+  // 방을 만든 PC가 나가도 방은 남고, 새로 들어온 기기는 남아 있는 기기에게서 방 열쇠를 받는다
+  pc.close();
+  await waitFor(() => iphone.changes.some((c) => c.left?.device === 'Windows PC'));
+  const ipad = await member(cookie, { code: iphone.code, device: 'iPad' });
+  await ipad.keyed;
+  await galaxy.send(0, FRAME.TEXT, 2, { text: '갤럭시가 모두에게' });
+  await waitFor(() => textsOf(ipad).length && textsOf(iphone).length === 2);
+  assert.deepEqual(textsOf(ipad), ['갤럭시가 모두에게']);
+  for (const p of [iphone, galaxy, ipad]) p.close();
+});
+
+test('한 방에는 10대까지 들어온다', async () => {
+  const cookie = (await login('5932')).headers.get('set-cookie').split(';')[0];
+  const peers = [await enter(cookie, { create: true, device: '1번' })];
+  for (let i = 2; i <= 10; i++) peers.push(await enter(cookie, { code: peers[0].code, device: `${i}번` }));
+  await assert.rejects(enter(cookie, { code: peers[0].code, device: '11번' }), (err) => err.code === 'full');
+  for (const p of peers) p.close();
 });

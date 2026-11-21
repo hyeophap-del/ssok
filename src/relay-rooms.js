@@ -1,7 +1,7 @@
 // 홈페이지에서 바로 주고받기 (중계 서버의 첫 화면):
-// 설치 없이 두 브라우저가 홈페이지에 들어와, 한쪽이 만든 6자리 방 코드를 다른 쪽이 넣으면 둘을 잇는다.
+// 설치 없이 여러 브라우저(최대 10대)가 홈페이지에 들어와, 한 기기가 만든 6자리 방 코드로 같은 방에 모인다.
 //   - 홈페이지를 쓰려면 중계 서버 주인이 정한 숫자 4자리 암호가 필요하다 (맞히면 그 브라우저는 30일 동안 기억)
-//   - 이은 뒤에는 두 브라우저가 그 자리에서 만든 열쇠(ECDH)로 종단간 암호화한다 (public/relay.js). 이 서버는 바이트만 넘긴다.
+//   - 방 안의 메시지는 '방 열쇠'로 종단간 암호화한다 (public/room-core.js). 이 서버는 받는 사람에게 나눠 주기만 한다.
 import crypto from 'node:crypto';
 import { acceptWebSocket } from './ws.js';
 import { sendJson, sendEmpty, readJson } from './http.js';
@@ -13,6 +13,7 @@ const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const ROOM_MS = 10 * 60_000; // 방 코드를 만들고 상대가 들어오기를 기다리는 시간
 const MAX_ROOMS = 200;
 const MAX_ROOMS_PER_ADDRESS = 5;
+const MAX_MEMBERS = 10; // 한 방에 들어올 수 있는 기기 수
 const MAX_WRONG = 10; // 암호·방 코드를 이만큼 틀리면 그 주소는 잠시 막는다
 const WRONG_WINDOW_MS = 10 * 60_000;
 const MAX_WRONG_ALL = 300; // 여러 주소에서 몰려와도: 10분 동안 전체로 이만큼 틀리면 잠시 모두 막는다
@@ -42,7 +43,7 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
   state.web ??= { pin: null, version: 1, bytes: 0 };
   state.web.key ??= crypto.randomBytes(32).toString('hex'); // 브라우저에 주는 입장권의 서명 열쇠
 
-  const rooms = new Map(); // 방 코드 → { host, device, address, timer }
+  const rooms = new Map(); // 방 코드 → { code, address, members: 번호 → { id, ws, device, e }, nextId, timer }
   const live = new Set();
   const wrong = new Map(); // 주소 → { count, since }
   let wrongAll = { count: 0, since: Date.now() };
@@ -141,39 +142,42 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
         msg = null;
       }
       const device = String(msg?.device || '기기').slice(0, 40);
-      if (msg?.t === 'create') return create(ws, address, device, origin);
-      if (msg?.t === 'join') return join(ws, address, device, String(msg.code || ''));
+      // 그 기기의 ECDH 공개 열쇠: 방 열쇠를 건네받을 때 쓴다 (중계 서버는 그대로 전하기만 한다)
+      const e = /^04[0-9a-f]{128}$/i.test(String(msg?.e || '')) ? String(msg.e) : '';
+      if (!e) return ws.close(4002, 'bad message');
+      if (msg?.t === 'create') return create(ws, address, device, e, origin);
+      if (msg?.t === 'join') return join(ws, address, device, e, String(msg.code || ''), origin);
       ws.close(4002, 'bad message');
     });
   }
 
-  function create(ws, address, device, origin) {
+  const memberList = (room) => [...room.members.values()].map(({ id, device, e }) => ({ id, device, e }));
+  const joinUrlOf = (origin, code) => `${origin}/#${code}`;
+
+  function create(ws, address, device, e, origin) {
     const mine = [...rooms.values()].filter((r) => r.address === address).length;
     if (rooms.size >= MAX_ROOMS || mine >= MAX_ROOMS_PER_ADDRESS) {
       ws.sendJson({ t: 'error', code: 'busy', message: '지금은 방을 더 만들 수 없어요. 잠시 뒤 다시 해 주세요.' });
       return ws.close(4003, 'busy');
     }
     const code = newCode();
-    const room = { host: ws, device, address };
+    const room = { code, address, members: new Map(), nextId: 1, everJoined: false };
+    // 10분 동안 아무도 들어오지 않으면 닫는다 (한 번이라도 들어왔으면 모두 나갈 때까지 연다)
     room.timer = setTimeout(() => {
-      if (rooms.get(code) !== room) return;
-      rooms.delete(code);
-      ws.sendJson({ t: 'error', code: 'expired', message: '10분 동안 아무도 들어오지 않아 방을 닫았어요.' });
-      ws.close(4008, 'expired');
+      if (rooms.get(code) !== room || room.everJoined) return;
+      for (const m of room.members.values()) {
+        m.ws.sendJson({ t: 'error', code: 'expired', message: '10분 동안 아무도 들어오지 않아 방을 닫았어요.' });
+        m.ws.close(4008, 'expired');
+      }
     }, ROOM_MS);
     room.timer.unref?.();
     rooms.set(code, room);
-    ws.on('close', () => {
-      if (rooms.get(code) === room) {
-        clearTimeout(room.timer);
-        rooms.delete(code);
-      }
-    });
-    const joinUrl = `${origin}/#${code}`;
-    ws.sendJson({ t: 'room', code, expires: Date.now() + ROOM_MS, url: joinUrl, qrSvg: toSvg(encodeQR(joinUrl, { ecl: 'M' })) });
+    const me = addMember(room, ws, device, e);
+    const url = joinUrlOf(origin, code);
+    ws.sendJson({ t: 'room', code, you: me.id, url, qrSvg: toSvg(encodeQR(url, { ecl: 'M' })), members: memberList(room) });
   }
 
-  function join(ws, address, device, code) {
+  function join(ws, address, device, e, code, origin) {
     if (blocked(address)) {
       ws.sendJson({ t: 'error', code: 'too-many', message: '코드를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요.' });
       return ws.close(4003, 'too many');
@@ -181,42 +185,73 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
     const room = /^\d{6}$/.test(code) ? rooms.get(code) : null;
     if (!room) {
       countWrong(address);
-      ws.sendJson({ t: 'error', code: 'no-room', message: '그 코드의 방이 없어요. 숫자를 확인하거나 상대에게 새 코드를 받아 주세요.' });
+      ws.sendJson({ t: 'error', code: 'no-room', message: '그 코드의 방이 없어요. 숫자를 확인하거나 방을 만든 사람에게 새 코드를 받아 주세요.' });
       return ws.close(4004, 'no room');
     }
-    clearTimeout(room.timer);
-    rooms.delete(code); // 한 방에는 두 사람만
-    room.host.sendJson({ t: 'joined', peer: device });
-    ws.sendJson({ t: 'joined', peer: room.device });
-    pipe(room.host, ws);
-    log('room', `홈페이지 방 연결: ${room.device} ↔ ${device}`);
+    if (room.members.size >= MAX_MEMBERS) {
+      ws.sendJson({ t: 'error', code: 'full', message: `한 방에는 ${MAX_MEMBERS}대까지 들어올 수 있어요.` });
+      return ws.close(4003, 'full');
+    }
+    room.everJoined = true;
+    const me = addMember(room, ws, device, e);
+    for (const m of room.members.values()) if (m !== me) m.ws.sendJson({ t: 'member-join', id: me.id, device, e });
+    const url = joinUrlOf(origin, code);
+    ws.sendJson({ t: 'welcome', code, you: me.id, url, qrSvg: toSvg(encodeQR(url, { ecl: 'M' })), members: memberList(room) });
+    log('room', `홈페이지 방 ${room.members.size}대: ${device} 들어옴`);
   }
 
-  /** 두 브라우저를 잇는다. 받는 쪽이 느리면 보내는 쪽을 잠깐 멈춘다 (이 서버 메모리에 쌓이지 않게). */
-  function pipe(a, b) {
-    live.add(a).add(b);
+  function addMember(room, ws, device, e) {
+    const member = { id: room.nextId++, ws, device, e };
+    room.members.set(member.id, member);
+    live.add(ws);
     let unsaved = 0;
-    const forward = (from, to) => {
-      from.on('message', (data, binary) => {
-        state.web.bytes = (state.web.bytes || 0) + data.length;
-        unsaved += data.length;
-        if (unsaved > 8 * 1024 * 1024) {
-          unsaved = 0;
-          save();
+    ws.on('message', (data, binary) => {
+      if (!binary) {
+        // 방 열쇠 건네기 등: 그 기기에게만 전한다 (보낸 기기 번호는 중계 서버가 붙인다)
+        let msg;
+        try {
+          msg = data.length < 4096 ? JSON.parse(data.toString('utf8')) : null;
+        } catch {
+          msg = null;
         }
-        if (!to.send(binary ? data : data.toString('utf8'))) {
-          from.pause();
-          to.once('drain', () => from.resume());
+        const target = msg?.t === 'signal' ? room.members.get(Number(msg.to)) : null;
+        if (target && target !== member) target.ws.sendJson({ t: 'signal', from: member.id, data: msg.data });
+        return;
+      }
+      // 바이트 메시지: [받는 사람 u16][...] → [보낸 사람 u16][...]. 0이면 나를 뺀 모두.
+      if (data.length < 2) return;
+      const to = data.readUInt16BE(0);
+      const out = Buffer.from(data);
+      out.writeUInt16BE(member.id, 0);
+      const targets = to === 0 ? [...room.members.values()].filter((m) => m !== member) : [room.members.get(to)].filter((m) => m && m !== member);
+      let waiting = 0;
+      for (const target of targets) {
+        state.web.bytes = (state.web.bytes || 0) + out.length;
+        unsaved += out.length;
+        if (!target.ws.send(out)) {
+          // 받는 쪽이 느리면 보내는 쪽을 잠깐 멈춘다 (이 서버 메모리에 쌓이지 않게). 가장 느린 기기에 맞춘다.
+          waiting++;
+          target.ws.once('drain', () => --waiting === 0 && ws.resume());
         }
-      });
-      from.on('close', () => {
-        live.delete(from);
-        to.close(1000, 'peer closed');
+      }
+      if (waiting) ws.pause();
+      if (unsaved > 8 * 1024 * 1024) {
+        unsaved = 0;
         save();
-      });
-    };
-    forward(a, b);
-    forward(b, a);
+      }
+    });
+    ws.on('close', () => {
+      live.delete(ws);
+      if (room.members.get(member.id) !== member) return;
+      room.members.delete(member.id);
+      for (const m of room.members.values()) m.ws.sendJson({ t: 'member-leave', id: member.id });
+      if (room.members.size === 0 && rooms.get(room.code) === room) {
+        clearTimeout(room.timer);
+        rooms.delete(room.code);
+      }
+      save();
+    });
+    return member;
   }
 
   return {
@@ -228,13 +263,12 @@ export function createRoomService({ state, save, clientAddress, log = () => {} }
       state.web.pin = pin === null ? null : String(pin);
       state.web.version += 1;
       save();
-      if (pin === null) for (const room of rooms.values()) room.host.close(4003, 'web off');
+      if (pin === null) for (const room of rooms.values()) for (const m of room.members.values()) m.ws.close(4003, 'web off');
     },
-    overview: () => ({ enabled: enabled(), pin: state.web.pin, bytes: state.web.bytes || 0, rooms: rooms.size, connected: live.size / 2 }),
+    overview: () => ({ enabled: enabled(), pin: state.web.pin, bytes: state.web.bytes || 0, rooms: rooms.size, connected: live.size }),
     /** 지금 주고받는 중인 방이 있는지 (업데이트를 미룰지 정할 때) */
     active: () => live.size,
     close() {
-      for (const room of rooms.values()) room.host.close(1001, 'server closing');
       for (const ws of live) ws.close(1001, 'server closing');
     },
   };

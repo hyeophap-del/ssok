@@ -33,7 +33,8 @@
     .session-main .dropzone { display: grid; }
     @media (pointer: coarse) { .session-main .dropzone { display: none; } }
     @media (pointer: fine) { .session-main .pick-buttons { display: none; } }
-    .peer-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .peer-line { display: flex; align-items: center; gap: 8px; }
+    .peer-line strong { flex: 1; min-width: 0; }
     .list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
     .xfer { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; }
     .xfer-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -72,7 +73,7 @@
     <section id="home-view" hidden>
       <div class="room-head">
         <h1>설치 없이 바로 주고받기</h1>
-        <p class="muted small">두 기기에서 이 홈페이지를 열고 같은 방에 들어오면 파일·사진·텍스트를 주고받을 수 있어요. 둘 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
+        <p class="muted small">기기마다 이 홈페이지를 열고 같은 방에 들어오면 파일·사진·텍스트를 주고받을 수 있어요 (한 방에 10대까지). 방에 들어온 기기 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
       </div>
       <div class="card center-card" style="margin-top: 16px">
         <button id="create" class="btn primary" type="button" style="min-height: 52px; font-size: 16px">새로 시작하기 (방 코드 만들기)</button>
@@ -90,7 +91,7 @@
       <h2>다른 기기에서 이 코드를 넣으세요</h2>
       <div id="room-code" class="room-code"></div>
       <div id="room-qr" class="room-qr" aria-label="방에 들어오는 QR 코드"></div>
-      <p class="muted small">다른 기기에서 <b id="room-host"></b>에 들어가 코드를 넣거나, 휴대폰 카메라로 QR을 찍으세요. 10분 동안 기다려요.</p>
+      <p class="muted small">다른 기기에서 <b id="room-host"></b>에 들어가 코드를 넣거나, 휴대폰 카메라로 QR을 찍으세요. 여러 기기가 들어와도 돼요. 10분 동안 기다려요.</p>
       <button id="wait-cancel" class="btn ghost" type="button">그만두기</button>
     </section>
 
@@ -98,9 +99,20 @@
     <section id="session-view" hidden>
       <div class="card session-main">
         <div class="peer-line">
-          <strong id="peer-name">상대 기기</strong>
+          <strong id="peer-name">방</strong>
+          <button id="invite" class="btn small" type="button">더 초대</button>
           <button id="leave" class="btn small ghost" type="button">나가기</button>
         </div>
+        <div id="invite-box" class="center-card" hidden>
+          <div id="invite-code" class="room-code" style="font-size: 30px"></div>
+          <div id="invite-qr" class="room-qr" style="width: 160px"></div>
+          <p class="muted small">다른 기기에서 <b id="invite-host"></b>에 들어가 이 코드를 넣거나 QR을 찍으면 이 방에 들어와요.</p>
+        </div>
+        <div class="targets">
+          <span class="targets-label">보낼 곳</span>
+          <div id="targets" class="chips" role="group" aria-label="보낼 곳"></div>
+        </div>
+        <p id="key-wait" class="muted small" hidden>방 열쇠를 받는 중이에요… (방에 있는 기기가 건네줘요)</p>
         <div class="pick-buttons">
           <label class="big-btn primary">
             <input id="pick-media" type="file" accept="image/*,video/*" multiple hidden>
