@@ -18,6 +18,7 @@ const SID = /^[0-9a-f]{32}$/;
 const MAX_PCS_PER_INVITE = 10;
 const MAX_SESSIONS_PER_PC = 16;
 const ACCEPT_TIMEOUT_MS = 10_000;
+const PAIR_CODE_MS = 10 * 60_000; // 다른 곳의 PC와 처음 연결할 때 쓰는 연결 코드의 유효 시간
 const MAX_BAD_TRIES = 20; // 초대 코드를 이만큼 틀리면 그 주소는 잠시 막는다
 const BAD_TRY_WINDOW_MS = 10 * 60_000;
 const STATIC_TYPES = {
@@ -73,6 +74,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
   const pending = new Map(); // 연결 번호 → { phone, pcId, queue, timer }
   const sessionCount = new Map(); // PC 번호 → 이어진 휴대폰 수
   const live = new Set(); // 이어 둔 웹소켓 (끌 때 닫는다)
+  const pairCodes = new Map(); // 연결 코드 → { pcId, expires } (PC 하나에 하나씩)
   const badTries = new Map(); // 접속한 주소 → { count, since }
 
   /** Cloudflare 터널 뒤에서는 실제 접속 주소가 이 헤더에 온다 */
@@ -120,6 +122,17 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     if (url.pathname === '/api/ping') return sendJson(res, 200, { app: `${APP_ID}-relay`, version });
     // 연결된 다른 PC가 '어디서나'로 보낼 수 있는지(그 PC가 지금 이 중계 서버에 붙어 있는지) 확인할 때
     if ((m = /^\/api\/online\/([0-9a-f]{16})$/.exec(url.pathname))) return sendJson(res, 200, { online: online.has(m[1]) });
+    // 다른 곳의 PC가 연결 코드로 상대 PC 번호를 찾을 때. 코드를 함부로 맞혀 보지 못하게 틀린 횟수를 센다.
+    if ((m = /^\/api\/pair-code\/([A-Z0-9]{4}-[A-Z0-9]{4})$/.exec(url.pathname))) {
+      const address = clientAddress(req);
+      if (tooManyTries(address)) return sendJson(res, 429, { error: '너무 많이 틀렸어요. 10분 뒤에 다시 시도해 주세요.' });
+      const entry = pairCodes.get(m[1]);
+      if (!entry || entry.expires < Date.now() || !online.has(entry.pcId)) {
+        countBadTry(address);
+        return sendJson(res, 404, { error: '연결 코드가 맞지 않거나 시간이 지났어요.' });
+      }
+      return sendJson(res, 200, { id: entry.pcId });
+    }
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(
@@ -253,7 +266,19 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       ws.on('message', (data, binary) => {
         heard = Date.now();
         if (state.pcs[msg.id]) state.pcs[msg.id].lastSeen = heard;
-        if (!binary && data.length < 100 && data.toString('utf8').includes('"ping"')) ws.sendJson({ t: 'pong' });
+        if (binary || data.length > 200) return;
+        const text = data.toString('utf8');
+        if (text.includes('"ping"')) ws.sendJson({ t: 'pong' });
+        else if (text.includes('"pair-code"')) {
+          // 이 PC가 다른 곳의 PC와 연결하려고 연결 코드를 만든다 (예전 코드는 지운다)
+          for (const [code, entry] of pairCodes) if (entry.pcId === msg.id || entry.expires < Date.now()) pairCodes.delete(code);
+          let code;
+          do code = newInviteCode();
+          while (pairCodes.has(code));
+          const expires = Date.now() + PAIR_CODE_MS;
+          pairCodes.set(code, { pcId: msg.id, expires });
+          ws.sendJson({ t: 'pair-code', code, expires });
+        }
       });
       ws.on('close', () => {
         clearInterval(keepAlive);

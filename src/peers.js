@@ -56,6 +56,26 @@ export function peerRelaySecret(key) {
   return new Uint8Array(crypto.createHash('sha256').update(`ssok-peer-relay-v1:${key}`).digest());
 }
 
+/**
+ * 다른 곳의 PC와 처음 연결할 때 쓰는 통로의 열쇠 (연결 코드에서 만든다).
+ * 중계 서버도 코드를 알지만 상관없다: 이 통로 안에서 다시 HTTPS로 연결 과정을 밟고, 6자리 숫자로 서로를 확인한다.
+ */
+export function pairChannelSecret(code, pcId) {
+  return new Uint8Array(crypto.createHash('sha256').update(`ssok-pair-v1:${code}:${pcId}`).digest());
+}
+
+/**
+ * 연결 코드 입력 해석: 'ABCD-EFGH', 'abcd efgh', 'ssok.example.com/ABCD-EFGH', 'ssok.example.com ABCD-EFGH'
+ * → { host: 'ssok.example.com' | null, code: 'ABCD-EFGH' }. 코드가 아니면 null.
+ * 가운데 '-'나 띄어쓰기가 있어야 한다 (붙여 쓴 8글자는 PC 이름일 수 있어서).
+ */
+export function parseRemoteCode(input) {
+  const text = String(input ?? '').trim().replace(/^https?:\/\//i, '');
+  const m = /^(?:([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?::(\d{1,5}))?[\s/]+)?([A-Za-z0-9]{4})(?:\s*-\s*|\s+)([A-Za-z0-9]{4})$/.exec(text);
+  if (!m) return null;
+  return { host: m[1] ? `${m[1].toLowerCase()}${m[2] ? `:${m[2]}` : ''}` : null, code: `${m[3]}-${m[4]}`.toUpperCase() };
+}
+
 export function isValidKey(key) {
   return typeof key === 'string' && PEER_KEY.test(key);
 }
@@ -100,17 +120,19 @@ export function parseAddress(input) {
  * pin(상대 인증서)이 있으면 그 인증서가 아닐 때 아무것도 보내지 않고 실패한다.
  * pin이 없으면(처음 연결할 때) 상대 인증서를 받아 와서 돌려준다.
  */
-export function requestJson({ address, port }, { method = 'GET', path: urlPath, body, headers = {}, timeout = 5000, pin = null }) {
+export function requestJson({ address, port }, { method = 'GET', path: urlPath, body, headers = {}, timeout = 5000, pin = null, socket = null }) {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     const req = https.request(
       {
-        host: address,
+        // socket: 중계 서버를 거친 통로 (다른 곳의 PC와 처음 연결할 때). 그 위에서 그대로 HTTPS를 한다.
+        host: socket ? '127.0.0.1' : address,
         port,
         method,
         path: urlPath,
         timeout,
         agent: false,
+        ...(socket ? { socket } : {}),
         ...(pin ? pinnedTlsOptions(pin) : { rejectUnauthorized: false }),
         headers: {
           'X-Requested-With': APP_ID,

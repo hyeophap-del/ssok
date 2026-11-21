@@ -249,10 +249,21 @@
       <ul id="paired" class="peer-list"></ul>
     </section>
 
+    <section class="peer-section remote-section">
+      <h3>다른 곳에 있는 PC</h3>
+      <p class="muted small">같은 Wi-Fi가 아니어도 연결할 수 있어요. 두 PC 모두 [설정]의 ‘어디서나 (중계 서버)’가 켜져 있어야 해요.</p>
+      <div id="remote-code-box" class="remote-code" hidden>
+        <div id="remote-code" class="code" aria-label="연결 코드"></div>
+        <p class="small">연결할 PC의 {{APP_NAME}}에서 <b>[다른 PC]</b> → 아래 칸에 이 코드를 넣게 하세요. <span id="remote-code-left" class="muted"></span></p>
+        <p id="remote-code-other" class="muted small"></p>
+      </div>
+      <button id="remote-code-make" class="btn small" type="button">이 PC의 연결 코드 만들기</button>
+    </section>
+
     <form id="connect-form" class="connect-form">
-      <label for="connect-address">목록에 안 보이면 상대 PC의 주소로 연결하세요</label>
+      <label for="connect-address">목록에 없거나 다른 곳에 있는 PC면, 상대 PC의 주소나 연결 코드를 넣으세요</label>
       <div class="connect-row">
-        <input id="connect-address" type="text" placeholder="예: 192.168.0.40" autocomplete="off" spellcheck="false" required>
+        <input id="connect-address" type="text" placeholder="예: 192.168.0.40 또는 ABCD-EFGH" autocomplete="off" spellcheck="false" required>
         <button class="btn" type="submit">연결</button>
       </div>
       <p class="muted small">이 PC는 <b id="self-name"></b> · 주소 <code id="self-address" class="inline-code"></code><span id="self-anywhere" hidden> · 밖에서는 <code id="self-anywhere-address" class="inline-code"></code></span></p>

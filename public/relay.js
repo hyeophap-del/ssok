@@ -18,6 +18,10 @@ export const FRAME = {
   CANCEL: 7, // 어느 쪽이든: 그 요청을 그만둔다
   AUTH: 8, // 휴대폰 → PC: 첫 암호 메시지 (열쇠가 맞는지 확인)
   AUTH_OK: 9,
+  // 그대로 통과시키는 연결 (다른 곳의 PC와 처음 연결할 때: 이 안으로 PC의 HTTPS를 그대로 흘려보낸다)
+  RAW_OPEN: 10,
+  RAW_DATA: 11,
+  RAW_END: 12,
 };
 
 export const CHUNK = 64 * 1024;
@@ -235,6 +239,8 @@ export class RelayClient {
       onClose: (err) => {
         for (const stream of client.streams.values()) stream.fail(err || new Error('연결이 끊겼어요'));
         client.streams.clear();
+        for (const raw of client.raws.values()) raw.onClose?.(err || new Error('연결이 끊겼어요'));
+        client.raws.clear();
         client.closed = true;
         onClose?.(err);
       },
@@ -245,11 +251,44 @@ export class RelayClient {
 
   constructor() {
     this.streams = new Map();
+    this.raws = new Map();
     this.nextId = 1;
     this.closed = false;
   }
 
+  /**
+   * 그대로 통과시키는 연결을 연다. PC 쪽은 이 바이트를 자기 쏙 서버 포트로 그대로 넘긴다.
+   * @returns {{ write(bytes: Uint8Array): Promise<void>, end(): void, abort(): void }}
+   */
+  openRaw({ onData, onEnd, onClose }) {
+    if (this.closed) throw new Error('연결이 끊겼어요');
+    const id = this.nextId;
+    this.nextId += 2;
+    this.raws.set(id, { onData, onEnd, onClose });
+    this.socket.send(FRAME.RAW_OPEN, id, {}).catch(() => {});
+    return {
+      write: async (bytes) => {
+        for (let at = 0; at < bytes.length; at += CHUNK) await this.socket.send(FRAME.RAW_DATA, id, bytes.subarray(at, at + CHUNK));
+        await this.socket.drain();
+      },
+      end: () => this.socket.send(FRAME.RAW_END, id, {}).catch(() => {}),
+      abort: () => {
+        if (this.raws.delete(id)) this.socket.send(FRAME.CANCEL, id, {}).catch(() => {});
+      },
+    };
+  }
+
   onFrame(type, id, payload) {
+    const raw = this.raws.get(id);
+    if (raw) {
+      if (type === FRAME.RAW_DATA) raw.onData?.(payload.slice());
+      else if (type === FRAME.RAW_END) raw.onEnd?.();
+      else if (type === FRAME.CANCEL) {
+        this.raws.delete(id);
+        raw.onClose?.(new Error('PC가 연결을 끊었어요'));
+      }
+      return;
+    }
     const stream = this.streams.get(id);
     if (!stream) return;
     if (type === FRAME.RES_HEAD) stream.head(JSON.parse(new TextDecoder().decode(payload)));

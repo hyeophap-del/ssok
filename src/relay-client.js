@@ -2,6 +2,8 @@
 // 암호화된 통로(public/relay.js)로 받은 요청을 이 PC의 쏙 서버에 그대로 전달한다.
 // 중계 서버는 휴대폰과 이 PC를 이어 주기만 하고, 내용(파일·텍스트)은 볼 수 없다.
 import http from 'node:http';
+import net from 'node:net';
+import { pairChannelSecret } from './peers.js';
 import { SecureSocket, FRAME, CHUNK } from '../public/relay.js';
 
 const PASS_REQUEST = ['content-type', 'content-length', 'x-requested-with', 'range', 'accept', 'user-agent'];
@@ -27,6 +29,7 @@ const decode = (bytes) => new TextDecoder().decode(bytes);
  * @param {(status: {state: string, error?: string}) => void} [options.onStatus]
  * @param {(peerId: string) => ({secret: Uint8Array, key: string} | null)} [options.peerLookup]
  *        연결된 다른 PC가 중계로 들어올 때: 그 PC와 나눠 가진 열쇠와, 그 PC가 이 PC에 내미는 키
+ * @param {Set<number>} [options.tunnelPorts]  그대로 통과시키는 연결이 이 PC의 쏙에 붙은 포트 (쏙이 'PC 화면'이 아닌 바깥 요청으로 대한다)
  */
 export function startRelayClient({
   relayUrl,
@@ -41,6 +44,7 @@ export function startRelayClient({
   relayKey,
   onStatus = () => {},
   peerLookup = () => null,
+  tunnelPorts = new Set(),
   log = () => {},
   WebSocketImpl = globalThis.WebSocket,
 }) {
@@ -51,6 +55,8 @@ export function startRelayClient({
   let retryTimer = null;
   let heartbeat = null;
   let lastHeard = 0; // 중계 서버에서 마지막으로 무언가 받은 때
+  let pairCode = null; // 다른 곳의 PC가 처음 연결할 때 쓰는 코드 { code, expires } (이 PC가 만들었을 때만)
+  let pairCodeWaiter = null;
   const sessions = new Set();
   let status = { state: 'connecting' };
   const setStatus = (next) => {
@@ -87,6 +93,10 @@ export function startRelayClient({
         setStatus({ state: 'error', error: msg.message || '중계 서버가 연결을 거절했어요.' });
       } else if (msg.t === 'incoming' && typeof msg.sid === 'string') {
         accept(msg.sid);
+      } else if (msg.t === 'pair-code' && /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(msg.code || '')) {
+        pairCode = { code: msg.code, expires: Number(msg.expires) || Date.now() + 10 * 60_000 };
+        pairCodeWaiter?.resolve(pairCode);
+        pairCodeWaiter = null;
       }
     };
     ws.onerror = () => {};
@@ -141,8 +151,12 @@ export function startRelayClient({
     const closed = new Promise((r) => (resolveClosed = r));
     const secure = new SecureSocket(ws, {
       role: 'pc',
-      // 휴대폰은 QR의 비밀 열쇠로, 연결된 PC는 자기 번호(kid)로 찾은 열쇠로 들어온다
-      secret: (hello) => (hello.kid === undefined ? secret : PEER_ID.test(String(hello.kid)) ? (peerLookup(hello.kid)?.secret ?? null) : null),
+      // 휴대폰은 QR의 비밀 열쇠로, 연결된 PC는 자기 번호(kid)로 찾은 열쇠로, 처음 연결하는 PC는 연결 코드로 들어온다
+      secret: (hello) => {
+        if (hello.kid === undefined) return secret;
+        if (hello.kid === 'pair') return pairCode && pairCode.expires > Date.now() ? pairChannelSecret(pairCode.code, pcId) : null;
+        return PEER_ID.test(String(hello.kid)) ? (peerLookup(hello.kid)?.secret ?? null) : null;
+      },
       onFrame: (type, id, payload) => {
         try {
           onFrame(type, id, payload);
@@ -152,6 +166,8 @@ export function startRelayClient({
         }
       },
       onClose: () => {
+        for (const socket of raws.values()) socket.destroy();
+        raws.clear();
         for (const { req, res } of streams.values()) {
           req.destroy();
           res?.destroy();
@@ -163,7 +179,55 @@ export function startRelayClient({
     secure.ready.then((info) => !secure.hello?.kid && log('relay-phone', info?.device || '휴대폰')).catch(() => {});
     const refuse = (id, status) => secure.send(FRAME.RES_HEAD, id, { status, headers: {} }).then(() => secure.send(FRAME.RES_END, id, {})).catch(() => {});
 
+    const raws = new Map(); // 그대로 통과시키는 연결 → 이 PC의 쏙 서버에 붙인 소켓
+
+    /** 처음 연결하는 PC: 바이트를 그대로 이 PC의 쏙 포트로 넘긴다 (그 안에서 HTTPS로 연결 과정을 밟는다) */
+    function openRaw(id) {
+      const socket = net.connect({ host: '127.0.0.1', port: localPort });
+      raws.set(id, socket);
+      let port = null;
+      socket.on('connect', () => {
+        port = socket.localPort;
+        tunnelPorts.add(port);
+      });
+      socket.on('data', (chunk) => {
+        socket.pause();
+        (async () => {
+          for (let at = 0; at < chunk.length; at += CHUNK) await secure.send(FRAME.RAW_DATA, id, chunk.subarray(at, at + CHUNK));
+          await secure.drain(1024 * 1024);
+        })().then(
+          () => socket.resume(),
+          () => socket.destroy(),
+        );
+      });
+      socket.on('end', () => secure.send(FRAME.RAW_END, id, {}).catch(() => {}));
+      socket.on('error', () => {});
+      socket.on('close', () => {
+        if (port !== null) tunnelPorts.delete(port);
+        if (raws.get(id) === socket) {
+          raws.delete(id);
+          secure.send(FRAME.CANCEL, id, {}).catch(() => {});
+        }
+      });
+    }
+
     function onFrame(type, id, payload) {
+      const pairing = secure.hello?.kid === 'pair';
+      if (type === FRAME.RAW_OPEN) {
+        if (!pairing || raws.size >= 4) return void secure.send(FRAME.CANCEL, id, {}).catch(() => {});
+        return openRaw(id);
+      }
+      const raw = raws.get(id);
+      if (raw) {
+        if (type === FRAME.RAW_DATA) raw.write(Buffer.from(payload));
+        else if (type === FRAME.RAW_END) raw.end();
+        else if (type === FRAME.CANCEL) {
+          raws.delete(id);
+          raw.destroy();
+        }
+        return;
+      }
+      if (pairing) return type === FRAME.REQ_HEAD ? refuse(id, 403) : undefined; // 처음 연결하는 PC는 연결 과정만 밟을 수 있다
       if (type === FRAME.REQ_HEAD) {
         const head = JSON.parse(decode(payload));
         const path = String(head.path || '');
@@ -234,6 +298,24 @@ export function startRelayClient({
   connect();
   return {
     status: () => status,
+    /** 다른 곳의 PC가 처음 연결할 때 넣을 코드를 중계 서버에서 받는다 (10분 동안 유효) */
+    requestPairCode() {
+      if (!control || control.readyState !== 1 || status.state !== 'connected') {
+        return Promise.reject(Object.assign(new Error('중계 서버에 연결되어 있지 않아요. [설정]의 ‘어디서나 (중계 서버)’를 확인해 주세요.'), { status: 409 }));
+      }
+      pairCodeWaiter?.reject(new Error('새 코드를 만들었어요'));
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pairCodeWaiter = null;
+          reject(Object.assign(new Error('중계 서버가 응답하지 않아요. 잠시 뒤 다시 시도해 주세요.'), { status: 504 }));
+        }, 10_000);
+        pairCodeWaiter = {
+          resolve: (value) => (clearTimeout(timer), resolve(value)),
+          reject: (err) => (clearTimeout(timer), reject(err)),
+        };
+        control.send(JSON.stringify({ t: 'pair-code' }));
+      });
+    },
     stop() {
       stopped = true;
       clearTimeout(retryTimer);

@@ -9,7 +9,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/app.js';
 import { Store } from '../src/store.js';
-import { PeerBook, peerRelaySecret, cleanRelayUrl } from '../src/peers.js';
+import { PeerBook, peerRelaySecret, cleanRelayUrl, pairChannelSecret, parseRemoteCode, requestJson } from '../src/peers.js';
+import { openTunnel } from '../src/relay-tunnel.js';
 import { loadIdentity } from '../src/tls.js';
 import { createRelayServer } from '../src/relay-server.js';
 import { startRelayClient } from '../src/relay-client.js';
@@ -20,7 +21,7 @@ import { APP_ID } from '../src/brand.js';
 // PC 두 대(A, B)를 같은 네트워크에서 연결해 두고, B가 집 밖으로 나간 것처럼 만든 뒤 중계 서버로 보내 본다
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const XRW = { 'X-Requested-With': APP_ID };
-const IDS = { A: 'a1a1a1a1a1a1a1a1', B: 'b2b2b2b2b2b2b2b2' };
+const IDS = { A: 'a1a1a1a1a1a1a1a1', B: 'b2b2b2b2b2b2b2b2', C: 'c3c3c3c3c3c3c3c3', D: 'd4d4d4d4d4d4d4d4' };
 const MARKER = 'PC-TO-PC-SECRET-CONTENT-';
 let tmp;
 let relay;
@@ -38,6 +39,10 @@ async function startPc(letter) {
   const book = new PeerBook(path.join(dir, 'peers.json')).load();
   const identity = loadIdentity(dir, `PC-${letter}`);
   const relayKey = `relay-key-${letter}-${crypto.randomBytes(8).toString('hex')}`;
+  const tunnelPorts = new Set();
+  const pc = { letter, id: IDS[letter], name: `PC-${letter}`, store, book, receivedDir, relayKey, tunnelPorts };
+  // server.js처럼: 연결 코드는 이 PC의 중계 연결에서 받는다
+  const relayPairCode = () => (pc.relayClient ? pc.relayClient.requestPairCode() : Promise.reject(Object.assign(new Error('중계 서버 없음'), { status: 409 })));
   const app = createApp({
     token: `token-${letter}`,
     receivedDir,
@@ -50,11 +55,12 @@ async function startPc(letter) {
     peerBook: book,
     relayKey,
     relayUrl: () => relayBase,
+    relayPairCode,
+    tunnelPorts,
     peerOptions: { pairTimeoutMs: 2000, verifyCooldownMs: 0, allowLocalRelay: true },
   });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
-  const pc = { letter, id: IDS[letter], name: `PC-${letter}`, app, store, book, receivedDir, relayKey, port: app.server.address().port };
-  return pc;
+  return Object.assign(pc, { app, port: app.server.address().port });
 }
 
 function connectRelay(pc, invite) {
@@ -70,6 +76,7 @@ function connectRelay(pc, invite) {
     localPort: pc.port,
     cookie: `${APP_ID}=token-${pc.letter}`,
     relayKey: pc.relayKey,
+    tunnelPorts: pc.tunnelPorts,
     peerLookup: (id) => {
       const peer = pc.book.getPaired(id);
       return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
@@ -265,4 +272,80 @@ test('상대 PC에서 연결을 해제했으면 중계로 보내려 할 때 알�
   assert.equal(res.status, 409);
   assert.match(res.json.error, /해제/);
   assert.equal(A.book.getPaired(B.id), null);
+});
+
+test('연결 코드를 해석한다 (붙여 쓴 8글자는 PC 이름일 수 있어 코드로 보지 않는다)', () => {
+  assert.deepEqual(parseRemoteCode('k7m2-qx9p'), { host: null, code: 'K7M2-QX9P' });
+  assert.deepEqual(parseRemoteCode('K7M2 QX9P'), { host: null, code: 'K7M2-QX9P' });
+  assert.deepEqual(parseRemoteCode('https://ssok.example.com/K7M2-QX9P'), { host: 'ssok.example.com', code: 'K7M2-QX9P' });
+  assert.equal(parseRemoteCode('K7M2QX9P'), null);
+  assert.equal(parseRemoteCode('192.168.0.40'), null);
+});
+
+test('다른 네트워크에 있는 PC와도 연결 코드로 처음 연결할 수 있다', async () => {
+  pcs.C = await startPc('C');
+  pcs.D = await startPc('D');
+  const { C, D } = pcs;
+  const invite = relay.createInvite('지인').code;
+  const cStatus = connectRelay(C, invite);
+  const dStatus = connectRelay(D, invite);
+  await waitUntil(() => cStatus.some((s) => s.state === 'connected') && dStatus.some((s) => s.state === 'connected'));
+
+  // 코드가 없거나 틀리면 찾지 못한다
+  assert.equal((await postJson(C, '/api/peers/connect-remote', { code: 'ZZZZ-ZZZZ' })).status, 404);
+
+  // D(받는 쪽)가 코드를 만들고, C에 그 코드를 넣는다
+  const made = await postJson(D, '/api/peers/remote-code', {});
+  assert.equal(made.status, 200);
+  assert.match(made.json.code, /^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+  const incoming = waitForEvent(D, 'pair-request');
+  const started = await postJson(C, '/api/peers/connect-remote', { code: made.json.code.toLowerCase() });
+  assert.equal(started.status, 202, JSON.stringify(started.json));
+  assert.equal(started.json.id, D.id);
+  assert.equal(started.json.name, 'PC-D');
+  const asked = await incoming;
+  assert.equal(asked.code, started.json.code, '두 화면에 같은 확인 숫자가 뜬다');
+  assert.equal(asked.address, '', '중계로 온 요청은 같은 네트워크 주소를 모른다');
+  const result = waitForEvent(C, 'pair-result');
+  assert.equal((await postJson(D, `/api/pair-requests/${asked.rid}/accept`, {})).status, 204);
+  assert.equal((await result).ok, true);
+
+  const dAtC = C.book.getPaired(D.id);
+  const cAtD = D.book.getPaired(C.id);
+  assert.equal(dAtC.address, '');
+  assert.equal(dAtC.relay, relayBase);
+  assert.equal(dAtC.port, D.port);
+  assert.equal(cAtD.address, '');
+  assert.equal(cAtD.relay, relayBase);
+  assert.equal((await request(C, { path: '/api/peers' })).json.peers.find((p) => p.id === D.id).via, 'relay');
+
+  // 연결되었으니 바로 중계로 주고받는다 (양쪽 모두)
+  const toD = await postJson(C, `/api/peers/${D.id}/text`, { text: '다른 곳에서 처음 연결하고 보냄' });
+  assert.equal(toD.status, 201, JSON.stringify(toD.json));
+  assert.equal(toD.json.via, 'relay');
+  assert.ok(D.store.list().some((i) => i.text === '다른 곳에서 처음 연결하고 보냄' && i.device === 'PC-C'));
+  const toC = await postJson(D, `/api/peers/${C.id}/text`, { text: '답장' });
+  assert.equal(toC.status, 201, JSON.stringify(toC.json));
+  assert.ok(C.store.list().some((i) => i.text === '답장'));
+});
+
+test('연결 코드 통로로는 연결 과정만 밟을 수 있다 (PC 화면 권한이 없다)', async () => {
+  const { C, D } = pcs;
+  const { json } = await postJson(D, '/api/peers/remote-code', {});
+  const url = `${relayBase.replace('http', 'ws')}/ws/c/${D.id}`;
+  const client = await RelayClient.connect(url, pairChannelSecret(json.code, D.id), { kid: 'pair' });
+  // 통로 안의 HTTPS로 PC 화면 전용 기능을 부르면, 이 PC 안에서 온 연결이어도 바깥 요청으로 다룬다
+  const peers = await requestJson({ address: '127.0.0.1', port: D.port }, { path: '/api/peers', socket: openTunnel(client) });
+  assert.equal(peers.status, 401);
+  const settings = await requestJson({ address: '127.0.0.1', port: D.port }, { method: 'POST', path: '/api/quit', socket: openTunnel(client) });
+  assert.equal(settings.status, 401);
+  // HTTP 요청 전달(휴대폰용)은 쓸 수 없다
+  assert.equal((await client.request('GET', '/api/session')).status, 403);
+  client.close();
+
+  // 코드를 만들지 않은 PC에는 연결 코드 통로가 열리지 않는다
+  await assert.rejects(
+    RelayClient.connect(`${relayBase.replace('http', 'ws')}/ws/c/${C.id}`, pairChannelSecret(json.code, C.id), { kid: 'pair' }),
+    (err) => err.code === 'UNKNOWN_PEER',
+  );
 });

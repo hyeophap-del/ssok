@@ -18,6 +18,7 @@ import { sendJson, sendEmpty, rejectBody, readJson, plainAddress } from './http.
 import { APP_NAME, APP_ID } from './brand.js';
 import { fingerprintOf, isValidCert, pinnedTlsOptions } from './tls.js';
 import { RelayClient } from '../public/relay.js';
+import { openTunnel } from './relay-tunnel.js';
 import {
   NONCE,
   PEER_ID,
@@ -27,8 +28,10 @@ import {
   isValidPort,
   newNonce,
   newPeerKey,
+  pairChannelSecret,
   pairCode,
   parseAddress,
+  parseRemoteCode,
   peerRelaySecret,
   pingApp,
   requestJson,
@@ -53,6 +56,7 @@ const CHANNEL_IDLE_MS = 60_000; // 중계 통로를 쓰지 않으면 이 시간 
  * @param {number} [options.verifyCooldownMs]  같은 PC의 새 주소를 다시 확인하기까지 기다리는 시간
  * @param {() => string|null} [options.relayUrl]  이 PC가 쓰는 중계 서버 주소 (연결된 PC에게 알려 준다)
  * @param {boolean} [options.allowLocalRelay]    시험용: http://127.0.0.1 중계 서버 주소도 받는다
+ * @param {() => Promise<{code: string, expires: number}>} [options.relayPairCode]  다른 곳의 PC가 연결할 때 넣을 코드 받기
  * @param {(type: string, payload?: any) => void} [options.log]
  */
 export function createPeerApi({
@@ -67,6 +71,7 @@ export function createPeerApi({
   verifyCooldownMs = 10_000,
   relayUrl = () => null,
   allowLocalRelay = false,
+  relayPairCode = null,
   log = () => {},
 }) {
   let pending = null; // 이 PC에 들어온 연결 요청 (한 번에 하나)
@@ -109,7 +114,7 @@ export function createPeerApi({
 
   // ---- 인증 없이 받는 요청: 연결 요청 ----
 
-  async function handlePublic(req, res, url) {
+  async function handlePublic(req, res, url, ctx = {}) {
     if (req.method !== 'POST' || (url.pathname !== '/api/pair/start' && url.pathname !== '/api/pair/finish')) return false;
     // 웹사이트가 브라우저를 시켜 몰래 연결 요청을 보내지 못하게 한다 (이 헤더는 스크립트가 다른 사이트로 보낼 수 없다)
     if (req.headers['x-requested-with'] !== APP_ID) {
@@ -122,12 +127,12 @@ export function createPeerApi({
       sendJson(res, 400, { error: '암호화된 연결(HTTPS)로만 연결할 수 있어요.' });
       return true;
     }
-    if (url.pathname === '/api/pair/start') await pairStart(req, res);
+    if (url.pathname === '/api/pair/start') await pairStart(req, res, ctx);
     else await pairFinish(req, res);
     return true;
   }
 
-  async function pairStart(req, res) {
+  async function pairStart(req, res, ctx = {}) {
     let body;
     try {
       body = await readJson(req, 16 * 1024);
@@ -155,7 +160,8 @@ export function createPeerApi({
       id: body.id,
       name,
       kind,
-      address: plainAddress(req.socket.remoteAddress),
+      // 중계 서버를 거쳐 온 요청(다른 곳의 PC)이면 같은 네트워크 주소를 모른다. 나중에 같은 네트워크에서 만나면 채워진다.
+      address: ctx.viaRelay ? '' : plainAddress(req.socket.remoteAddress),
       port: kind === 'pc' ? body.port : null,
       cert: kind === 'pc' ? body.cert : null,
       key: kind === 'pc' ? body.key : null,
@@ -167,7 +173,7 @@ export function createPeerApi({
       if (pending === request) pending = null;
     }, COMMIT_TIMEOUT_MS);
     pending = request;
-    return sendJson(res, 200, { id: self().id, name: self().name, nb: request.nb });
+    return sendJson(res, 200, { id: self().id, name: self().name, nb: request.nb, port: self().port });
   }
 
   async function pairFinish(req, res) {
@@ -273,6 +279,15 @@ export function createPeerApi({
       await connectByAddress(req, res);
       return true;
     }
+    if (pathname === '/api/peers/remote-code' && method === 'POST') {
+      rejectBody(req, res);
+      await makeRemoteCode(res);
+      return true;
+    }
+    if (pathname === '/api/peers/connect-remote' && method === 'POST') {
+      await connectRemote(req, res);
+      return true;
+    }
 
     let m;
     if ((m = /^\/api\/pair-requests\/([0-9a-f]{16})\/(accept|deny)$/.exec(pathname)) && method === 'POST') {
@@ -301,7 +316,7 @@ export function createPeerApi({
       log('unpaired', peer.name);
       // 상대 PC에도 알린다 (같은 네트워크에 없으면 중계 서버로). 꺼져 있으면 다음에 보낼 때 상대가 알아서 거절한다.
       if (peer.kind === 'pc') {
-        requestJson(peer, { method: 'POST', path: '/api/peer/unpair', headers: peerHeaders(peer), pin: peer.cert, timeout: 3000 })
+        (peer.address ? requestJson(peer, { method: 'POST', path: '/api/peer/unpair', headers: peerHeaders(peer), pin: peer.cert, timeout: 3000 }) : Promise.reject(new Error('주소 모름')))
           .catch(() => peer.relay && relayRequest(peer, 'POST', '/api/peer/unpair', { 'x-requested-with': APP_ID }))
           .catch(() => {})
           .finally(() => closeChannel(peer.id));
@@ -346,12 +361,67 @@ export function createPeerApi({
     return sendJson(res, 200, { peer: book.list().find((p) => p.id === info.id) });
   }
 
-  async function startPairing(res, id) {
-    const target = book.target(id);
+  /**
+   * 연결 과정. target이 다른 곳의 PC({ remote: { relay, code } })면 그 PC의 중계 서버를 거친 통로 안에서
+   * 똑같이 HTTPS로 진행한다. 중계 서버는 통로 열쇠(연결 코드)를 알 수 있지만 그 안의 HTTPS는 풀 수 없고,
+   * 끼어들면 두 화면의 6자리 숫자가 달라진다.
+   */
+/** 다른 곳의 PC가 이 PC에 처음 연결할 때 넣을 코드를 만든다 (이 PC의 중계 서버에 10분 동안 등록) */
+  async function makeRemoteCode(res) {
+    const relay = myRelay();
+    if (!relay || !relayPairCode) {
+      return sendJson(res, 409, { error: '먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요. 다른 곳의 PC와 연결할 때 중계 서버를 거쳐요.' });
+    }
+    try {
+      const { code, expires } = await relayPairCode();
+      return sendJson(res, 200, { code, expires, relay: new URL(relay).host });
+    } catch (err) {
+      return sendJson(res, err.status || 502, { error: err.message });
+    }
+  }
+
+  /** 다른 곳의 PC가 만든 연결 코드로 그 PC를 찾아 연결을 시작한다 */
+  async function connectRemote(req, res) {
+    let body;
+    try {
+      body = await readJson(req, 1024);
+    } catch {
+      return sendJson(res, 413, { error: '잘못된 요청이에요.' });
+    }
+    const parsed = parseRemoteCode(body?.code);
+    if (!parsed) return sendJson(res, 400, { error: '연결 코드를 확인해 주세요. 예: ABCD-EFGH' });
+    // 주소 없이 코드만 넣었으면 이 PC가 쓰는 중계 서버에서 찾는다 (보통 같은 중계 서버를 쓴다)
+    const relay = parsed.host ? cleanRelay(`https://${parsed.host}`) : myRelay();
+    if (!relay) {
+      return sendJson(res, 400, { error: '상대 PC의 중계 서버 주소를 코드 앞에 붙여 주세요. 예: ssok.example.com/ABCD-EFGH' });
+    }
+    let found;
+    try {
+      const lookup = await fetch(`${relay}/api/pair-code/${parsed.code}`, { signal: AbortSignal.timeout(8000) });
+      found = lookup.ok ? await lookup.json() : { error: (await lookup.json().catch(() => null))?.error };
+    } catch {
+      return sendJson(res, 502, { error: `중계 서버(${new URL(relay).host})에 연결하지 못했어요. 인터넷 연결을 확인해 주세요.` });
+    }
+    if (!PEER_ID.test(found?.id || '')) return sendJson(res, 404, { error: found?.error || '연결 코드가 맞지 않거나 시간이 지났어요.' });
+    if (found.id === self().id) return sendJson(res, 400, { error: '이 PC가 만든 코드예요. 연결할 다른 PC에서 넣어 주세요.' });
+    const paired = book.getPaired(found.id);
+    if (paired?.kind === 'pc') return sendJson(res, 409, { error: `이미 연결된 PC예요: ${paired.name}` });
+    return startPairing(res, found.id, { id: found.id, name: '상대 PC', address: '127.0.0.1', port: 8765, remote: { relay, code: parsed.code } });
+  }
+
+  async function startPairing(res, id, target = book.target(id)) {
     if (!target) return sendJson(res, 404, { error: '그 PC를 찾을 수 없어요. 다시 찾아 주세요.' });
     const me = self();
     const na = newNonce();
     const recvKey = newPeerKey();
+    const remote = target.remote ?? null;
+    let tunnelClient = null;
+    const via = async () => {
+      if (!remote) return {};
+      tunnelClient ??= RelayClient.connect(`${remote.relay.replace(/^http/, 'ws')}/ws/c/${id}`, pairChannelSecret(remote.code, id), { kid: 'pair', device: me.name });
+      return { socket: openTunnel(await tunnelClient) };
+    };
+    const closeTunnel = () => tunnelClient?.then((c) => c.close(), () => {});
 
     // 1단계: 내 정보와 봉인한 난수를 보내고, 상대 인증서와 난수를 받는다
     let first;
@@ -361,27 +431,42 @@ export function createPeerApi({
         path: '/api/pair/start',
         body: { id: me.id, name: me.name, kind: 'pc', port: me.port, cert: identity.cert, key: recvKey, commit: sha256(na), relay: myRelay() },
         timeout: 8000,
+        ...(await via()),
       });
-    } catch {
+    } catch (err) {
+      closeTunnel();
+      if (err.code === 'UNKNOWN_PEER') return sendJson(res, 410, { error: '연결 코드의 시간이 지났어요. 상대 PC에서 코드를 다시 만들어 주세요.' });
       return sendJson(res, 502, { error: offlineMessage(target.name) });
     }
     if (first.status === 409) {
+      closeTunnel();
       return sendJson(res, 409, { error: `${target.name}에서 다른 연결 요청을 처리하는 중이에요. 잠시 뒤 다시 시도해 주세요.` });
     }
     if (first.status !== 200 || first.json?.id !== id || !NONCE.test(first.json?.nb || '') || !first.cert) {
+      closeTunnel();
       return sendJson(res, 502, { error: first.json?.error || '다른 PC가 응답했어요. 목록을 새로 고친 뒤 다시 시도해 주세요.' });
     }
     const peerCert = first.cert;
+    const peerName = cleanName(first.json.name) || target.name;
     const code = pairCode(identity.fingerprint, fingerprintOf(peerCert), na, first.json.nb);
-    sendJson(res, 202, { code });
+    sendJson(res, 202, { id, name: peerName, code });
 
     // 2단계: 받은 인증서로 고정한 연결로 난수를 공개하고, 상대가 [허용]을 누를 때까지 기다린다
-    requestJson(target, { method: 'POST', path: '/api/pair/finish', body: { id: me.id, na }, pin: peerCert, timeout: pairTimeoutMs + 15_000 })
+    via()
+      .then((extra) => requestJson(target, { method: 'POST', path: '/api/pair/finish', body: { id: me.id, na }, pin: peerCert, timeout: pairTimeoutMs + 15_000, ...extra }))
       .then(({ status, json }) => {
         if (status === 200 && isValidKey(json?.key)) {
-          const name = cleanName(first.json.name) || target.name;
-          book.pair({ id, name, kind: 'pc', address: target.address, port: target.port, cert: peerCert, sendKey: json.key, recvKey, relay: cleanRelay(json.relay) });
-          book.saw({ id, name, address: target.address, port: target.port });
+          const name = peerName;
+          const relay = cleanRelay(json.relay) ?? remote?.relay ?? null;
+          if (remote) {
+            // 다른 곳의 PC: 같은 네트워크 주소는 모른다 (나중에 같은 네트워크에서 만나면 알아서 채워진다)
+            const port = isValidPort(first.json.port) ? first.json.port : 8765;
+            book.pair({ id, name, kind: 'pc', address: '', port, cert: peerCert, sendKey: json.key, recvKey, relay });
+            book.sawRelay(id);
+          } else {
+            book.pair({ id, name, kind: 'pc', address: target.address, port: target.port, cert: peerCert, sendKey: json.key, recvKey, relay });
+            book.saw({ id, name, address: target.address, port: target.port });
+          }
           infoAt.set(id, Date.now());
           log('paired', name);
           return { id, ok: true, name };
@@ -395,6 +480,7 @@ export function createPeerApi({
       })
       .catch(() => ({ id, ok: false, error: '연결이 끊겼어요. 다시 시도해 주세요.' }))
       .then((result) => {
+        closeTunnel();
         // 화면이 새 목록을 먼저 받아야 결과를 보고 바로 그 PC를 고를 수 있다
         changed();
         broadcastHost('pair-result', result);
@@ -427,7 +513,7 @@ export function createPeerApi({
     // 같은 네트워크에서 안 보이면 중계 서버로 보낸다. 목록이 아직 확인 전일 수 있어 잠깐 직접 확인해 본다.
     let viaRelay = false;
     if (!book.isOnline(peer.id) && peer.relay) {
-      const pong = await pingApp(peer, { pin: peer.cert, timeout: 1200 });
+      const pong = peer.address ? await pingApp(peer, { pin: peer.cert, timeout: 1200 }) : null;
       if (pong?.id === peer.id) book.saw({ id: peer.id, name: peer.name, address: peer.address, port: peer.port });
       else viaRelay = true;
     }
@@ -633,7 +719,7 @@ export function createPeerApi({
       [...book.paired.values()]
         .filter((peer) => peer.kind === 'pc')
         .map(async (peer) => {
-          const info = await pingApp(peer, { pin: peer.cert });
+          const info = peer.address ? await pingApp(peer, { pin: peer.cert }) : null;
           if (info?.id === peer.id) {
             book.saw({ id: peer.id, name: cleanName(info.name) || peer.name, address: peer.address, port: peer.port });
             book.lostRelay(peer.id);

@@ -1179,6 +1179,7 @@ function setupPeers() {
     renderPairing();
   });
   $('connect-form').addEventListener('submit', connectByAddress);
+  $('remote-code-make').addEventListener('click', makeRemoteCode);
 
   $('request-accept').addEventListener('click', () => decideRequest('accept'));
   $('request-deny').addEventListener('click', () => decideRequest('deny'));
@@ -1264,7 +1265,8 @@ function peerRow(peer) {
   if (peer.kind === 'app') sub.append('휴대폰 앱');
   else {
     if (peer.paired) sub.append(el('span', { class: peer.online ? 'on' : '' }, peer.via === 'relay' ? '어디서나 (중계)' : peer.online ? '켜져 있음' : '꺼져 있음'), ' · ');
-    sub.append(peer.via === 'relay' ? '집 밖에서도 보낼 수 있어요' : peer.address);
+    // 다른 곳에서 연결한 PC는 같은 네트워크 주소를 모른다
+    sub.append(peer.via === 'relay' ? '집 밖에서도 보낼 수 있어요' : peer.address || '다른 곳에서 연결한 PC');
   }
   info.append(sub);
 
@@ -1332,6 +1334,40 @@ async function unpair(id) {
   }
 }
 
+/** 다른 곳의 PC가 이 PC에 연결할 때 넣을 코드를 만들어 보여 준다 (10분 동안) */
+let remoteCodeTimer = null;
+async function makeRemoteCode() {
+  const button = $('remote-code-make');
+  button.disabled = true;
+  try {
+    const { code, expires, relay } = await api('/api/peers/remote-code', { method: 'POST' });
+    $('remote-code').textContent = code;
+    $('remote-code-other').textContent = `상대 PC가 다른 중계 서버를 쓴다면: ${relay}/${code}`;
+    $('remote-code-box').hidden = false;
+    button.textContent = '새 코드 만들기';
+    clearInterval(remoteCodeTimer);
+    const tick = () => {
+      const left = Math.ceil((expires - Date.now()) / 60_000);
+      if (left <= 0) {
+        clearInterval(remoteCodeTimer);
+        $('remote-code-box').hidden = true;
+        button.textContent = '이 PC의 연결 코드 만들기';
+        return;
+      }
+      $('remote-code-left').textContent = `(${left}분 동안 쓸 수 있어요)`;
+    };
+    tick();
+    remoteCodeTimer = setInterval(tick, 15_000);
+  } catch (err) {
+    showError(err);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** 'ABCD-EFGH', 'ssok.example.com/ABCD-EFGH' 같은 연결 코드인지 (서버의 parseRemoteCode와 같은 모양) */
+const looksLikeRemoteCode = (text) => /^(?:(?:https?:\/\/)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?[\s/]+)?[A-Za-z0-9]{4}(?:\s*-\s*|\s+)[A-Za-z0-9]{4}$/.test(text.trim());
+
 async function connectByAddress(e) {
   e.preventDefault();
   const input = $('connect-address');
@@ -1339,6 +1375,27 @@ async function connectByAddress(e) {
   button.disabled = true;
   state.pairing = null;
   renderPairing();
+  if (looksLikeRemoteCode(input.value)) {
+    // 다른 곳의 PC: 코드로 찾아 바로 연결을 시작한다 (확인 숫자가 뜬다)
+    earlyPairResult = null;
+    try {
+      const { id, name, code } = await api('/api/peers/connect-remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: input.value }),
+      });
+      input.value = '';
+      state.pairing = { id, name, code };
+      renderPeerDialog();
+      if (earlyPairResult?.id === id) onPairResult(earlyPairResult);
+    } catch (err) {
+      state.pairing = { id: null, error: err.message };
+      renderPairing();
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
   try {
     const { peer } = await api('/api/peers/connect', {
       method: 'POST',
@@ -1365,7 +1422,8 @@ async function connectByAddress(e) {
 function showRequest(request) {
   state.request = request;
   $('request-name').textContent = request.name;
-  $('request-address').textContent = request.kind === 'app' ? ` (휴대폰 앱 · ${request.address})` : ` (${request.address})`;
+  $('request-address').textContent =
+    request.kind === 'app' ? ` (휴대폰 앱 · ${request.address})` : request.address ? ` (${request.address})` : ' (다른 곳 · 중계 서버를 거쳐)';
   $('request-code').textContent = formatCode(request.code);
   const dialog = $('request-dialog');
   if (!dialog.open) dialog.showModal();

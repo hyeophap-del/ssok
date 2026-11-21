@@ -430,6 +430,7 @@ async function main() {
   // ---- 어디서나 (중계 서버) ----
   // 중계로 들어온 휴대폰 요청은 이 PC 안에서 대신 보내므로, 이 값으로 표시해 PC 화면 권한을 주지 않는다
   const relayKey = crypto.randomBytes(24).toString('base64url');
+  const tunnelPorts = new Set(); // 다른 곳의 PC가 처음 연결할 때 중계 통로가 이 PC의 쏙에 붙은 포트
   let relayClient = null;
   let relayStatus = { state: 'off' };
   function relayInfo() {
@@ -460,6 +461,7 @@ async function main() {
       cookie: `${APP_ID}=${config.token}`,
       relayKey,
       // 연결된 다른 PC가 집 밖에서 중계로 보낼 때: 그 PC와 나눠 가진 키로 통로를 열고, 그 키로 들어온 것으로 본다
+      tunnelPorts,
       peerLookup: (id) => {
         const peer = peerBook.getPaired(id);
         return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
@@ -511,6 +513,8 @@ async function main() {
     relayKey,
     relayInfo: () => relayInfo(),
     relayUrl: () => (localOnly ? null : (config.relay?.url ?? null)),
+    relayPairCode: () => (relayClient ? relayClient.requestPairCode() : Promise.reject(Object.assign(new Error('먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요.'), { status: 409 }))),
+    tunnelPorts,
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self,

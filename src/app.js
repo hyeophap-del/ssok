@@ -42,6 +42,8 @@ const PAGE_CSP = [
 const FILE_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
 
 const TEMPLATED = new Set(['.html', '.js', '.webmanifest']);
+/** 이 PC 안에서 온 연결인지 (127.x.x.x, ::1) */
+const isLoopback = (address = '') => /^(?:::ffff:)?127\./.test(address) || address === '::1';
 
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -161,6 +163,8 @@ export function createApp(options) {
     relayKey = null, // 중계 서버를 거쳐 온 휴대폰 요청에 붙는 값 (이 PC에서 온 것처럼 보여도 PC 화면 권한은 주지 않는다)
     relayInfo = () => null, // 어디서나(중계) 주소와 연결 상태
     relayUrl = () => null, // 이 PC가 쓰는 중계 서버 주소 (연결된 다른 PC에게 알려 줘서 집 밖에서도 보내게 한다)
+    relayPairCode = null, // 다른 곳의 PC가 처음 연결할 때 넣을 코드 받기 (중계 서버)
+    tunnelPorts = new Set(), // 중계 통로가 이 PC의 쏙에 붙은 포트 (이 PC 안에서 온 연결이지만 바깥 요청이다)
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -192,6 +196,7 @@ export function createApp(options) {
         showHostPage,
         announce,
         relayUrl,
+        relayPairCode,
         log,
         ...peerOptions,
       })
@@ -234,11 +239,14 @@ export function createApp(options) {
 
   function authenticate(req, url) {
     // 중계로 온 요청(휴대폰, 연결된 다른 PC)은 이 PC 안에서 대신 보낸 것이라 주소만 보면 PC 화면처럼 보인다. 표시를 보고 구별한다.
-    const viaRelay = Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey);
+    const viaRelay =
+      (Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey)) ||
+      // 다른 곳의 PC가 처음 연결할 때 중계 통로를 그대로 지나 이 PC에 붙은 연결 (그 안에서 HTTPS를 한다)
+      (tunnelPorts.has(req.socket.remotePort) && isLoopback(req.socket.remoteAddress));
     // 연결해 둔 다른 PC는 서로 주고받은 키로 들어온다. 같은 PC에서 왔더라도 'PC 화면' 권한은 주지 않는다.
     const peer = peers?.authenticate(req, { viaRelay });
     if (peer !== undefined) {
-      return { isHost: false, authed: Boolean(peer), peer, giveCookie: false, device: peer?.name ?? '다른 PC' };
+      return { isHost: false, viaRelay, authed: Boolean(peer), peer, giveCookie: false, device: peer?.name ?? '다른 PC' };
     }
     const isHost = !viaRelay && isHostAddress(req.socket.remoteAddress);
     // PC 자신의 요청이라도 다른 웹사이트가 몰래 보낸 요청이면 믿지 않는다.
@@ -249,6 +257,7 @@ export function createApp(options) {
     const queryOk = safeEqual(url.searchParams.get('k') ?? undefined, token);
     return {
       isHost,
+      viaRelay,
       authed: cookieOk || queryOk || (isHost && trustedSite),
       giveCookie: queryOk && !cookieOk,
       // 주소에 접속 코드를 담아 보낸 요청(아이폰 단축어 등). 브라우저가 몰래 붙여 보내는 쿠키가 아니므로 CSRF 걱정이 없다.
@@ -278,7 +287,7 @@ export function createApp(options) {
         ...(ctx.isHost ? { exe: process.execPath } : {}),
       });
     }
-    if (peers && (await peers.handlePublic(req, res, url))) return;
+    if (peers && (await peers.handlePublic(req, res, url, ctx))) return;
     if (!ctx.authed) {
       rejectBody(req, res);
       return sendJson(res, 401, { error: 'PC 화면의 QR 코드를 다시 스캔해 주세요.' });
