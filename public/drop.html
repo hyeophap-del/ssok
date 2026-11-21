@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
-  <title>{{APP_NAME}} · 보내기</title>
+  <title>{{APP_NAME}}</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <style>
@@ -18,10 +18,19 @@
     .drop-main .dropzone { display: grid; }
     @media (pointer: coarse) { .drop-main .dropzone { display: none; } }
     @media (pointer: fine) { .drop-main .pick-buttons { display: none; } }
-    .sent { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-    .sent li { display: flex; align-items: center; gap: 10px; font-size: 14px; }
-    .sent .icon { color: var(--success); }
-    .sent .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pin-card { display: grid; gap: 12px; text-align: center; }
+    .pin-card input {
+      font: 700 22px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.2em; text-align: center;
+      min-height: 52px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+    }
+    .pin-card input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+    .pin-error { color: var(--danger); font-size: 14px; margin: 0; }
+    .list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+    .list li { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+    .list .icon { color: var(--muted); }
+    .list .sent-icon { color: var(--success); }
+    .list .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .list .text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 6.5em; overflow: auto; }
     .note { font-size: 12px; color: var(--muted); text-align: center; }
     body.dragging .dropzone { border-color: var(--accent); background: var(--accent-soft); }
   </style>
@@ -39,11 +48,17 @@
   </header>
 
   <main class="drop-page">
-    <section id="drop-ready" hidden>
-      <div class="drop-head">
-        <h1 id="drop-title">보내기</h1>
-        <p class="muted small">보낸 파일은 받는 사람의 PC에 바로 저장돼요. 받는 사람 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
-      </div>
+    <form id="pin-form" class="card pin-card" hidden>
+      <h1 id="pin-title" style="font-size: 20px">비밀번호를 넣어 주세요</h1>
+      <p class="muted small" style="margin: 0">링크를 보낸 사람에게 받은 비밀번호예요. 이 브라우저는 다음부터 기억해요.</p>
+      <input id="pin-input" type="password" inputmode="numeric" autocomplete="off" maxlength="20" aria-label="비밀번호" required>
+      <p id="pin-error" class="pin-error" hidden></p>
+      <button class="btn primary" type="submit">열기</button>
+    </form>
+
+    <section id="drop-ready" class="drop-head" hidden>
+      <h1 id="drop-title">주고받기</h1>
+      <p class="muted small">보낸 파일은 상대 PC에 바로 저장돼요. 둘 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
     </section>
 
     <section id="drop-main" class="card drop-main" hidden>
@@ -80,9 +95,14 @@
       <div id="transfer-detail" class="muted small"></div>
     </section>
 
+    <section id="inbox-card" class="card" hidden>
+      <h2 id="inbox-title">받은 것</h2>
+      <ul id="inbox" class="list"></ul>
+    </section>
+
     <section id="sent-card" class="card" hidden>
       <h2>보낸 것</h2>
-      <ul id="sent" class="sent" style="margin-top: 10px"></ul>
+      <ul id="sent" class="list"></ul>
     </section>
 
     <div id="locked" class="locked" hidden>
@@ -93,7 +113,7 @@
       </div>
     </div>
 
-    <p class="note">{{APP_NAME}} 받기 링크 · 이 링크를 받은 사람만 쓰세요</p>
+    <p class="note">{{APP_NAME}} 링크 · 이 링크와 비밀번호를 받은 사람만 쓰세요</p>
   </main>
   <div id="toasts" class="toasts" aria-live="polite"></div>
 

@@ -111,7 +111,7 @@ function autoName(device, type) {
 }
 
 function publicItem(item) {
-  const base = { id: item.id, kind: item.kind, from: item.from, device: item.device, createdAt: item.createdAt };
+  const base = { id: item.id, kind: item.kind, from: item.from, device: item.device, createdAt: item.createdAt, ...(item.to ? { to: item.to } : {}) };
   if (item.kind === 'text') return { ...base, text: item.text };
   return { ...base, name: item.name, size: item.size, mime: mimeOf(item.name) };
 }
@@ -165,7 +165,8 @@ export function createApp(options) {
     relayUrl = () => null, // 이 PC가 쓰는 중계 서버 주소 (연결된 다른 PC에게 알려 줘서 집 밖에서도 보내게 한다)
     relayPairCode = null, // 다른 곳의 PC가 처음 연결할 때 넣을 코드 받기 (중계 서버)
     tunnelPorts = new Set(), // 중계 통로가 이 PC의 쏙에 붙은 포트 (이 PC 안에서 온 연결이지만 바깥 요청이다)
-    drops = null, // 받기 링크 목록 (src/drops.js). 쏙이 없는 사람이 링크로 이 PC에 보낼 때
+    drops = null, // 링크 목록 (src/drops.js). 쏙이 없는 사람이 링크로 이 PC와 주고받을 때
+    relayLinks = null, // { claim(name, linkId): Promise, release(name) } 링크 이름을 중계 서버에 등록·해제
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -247,7 +248,22 @@ export function createApp(options) {
     // 받기 링크로 온 요청 (중계로만 온다): 그 링크로 보내기만 할 수 있다
     if (viaRelay && req.headers['x-ssok-drop'] !== undefined) {
       const link = drops?.active(String(req.headers['x-ssok-drop'])) ?? null;
-      return { isHost: false, viaRelay, authed: Boolean(link), drop: link, giveCookie: false, device: link ? `${link.label} · 받기 링크` : '받기 링크' };
+      let pin;
+      try {
+        pin = req.headers['x-ssok-pin'] === undefined ? undefined : decodeURIComponent(String(req.headers['x-ssok-pin']));
+      } catch {
+        pin = '';
+      }
+      const check = link ? drops.checkPin(link, pin) : 'gone';
+      return {
+        isHost: false,
+        viaRelay,
+        authed: check === 'ok',
+        drop: check === 'ok' ? link : null,
+        dropError: check === 'ok' ? null : check, // 'wrong' | 'locked' | 'gone'
+        giveCookie: false,
+        device: link ? `${link.label} · 링크` : '링크',
+      };
     }
     // 연결해 둔 다른 PC는 서로 주고받은 키로 들어온다. 같은 PC에서 왔더라도 'PC 화면' 권한은 주지 않는다.
     const peer = peers?.authenticate(req, { viaRelay });
@@ -294,6 +310,15 @@ export function createApp(options) {
       });
     }
     if (peers && (await peers.handlePublic(req, res, url, ctx))) return;
+    if (ctx.dropError) {
+      rejectBody(req, res);
+      const reasons = {
+        wrong: '비밀번호가 맞지 않아요.',
+        locked: '비밀번호를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요.',
+        gone: '이 링크는 꺼졌거나 기간이 지났어요.',
+      };
+      return sendJson(res, ctx.dropError === 'gone' ? 410 : 401, { error: reasons[ctx.dropError], code: ctx.dropError });
+    }
     if (!ctx.authed) {
       rejectBody(req, res);
       return sendJson(res, 401, { error: 'PC 화면의 QR 코드를 다시 스캔해 주세요.' });
@@ -312,6 +337,15 @@ export function createApp(options) {
       if (pathname === '/api/drop-info' && method === 'GET') {
         return sendJson(res, 200, { name: self.name, label: ctx.drop.label, expiresAt: ctx.drop.expiresAt });
       }
+      // 이 PC가 이 링크 상대에게 보낸 것 (다른 목록은 보이지 않는다)
+      if (pathname === '/api/drop-items' && method === 'GET') {
+        return sendJson(res, 200, { items: store.list().filter((i) => i.to === ctx.drop.id).map(publicItem) });
+      }
+      const dropFile = /^\/api\/drop-files\/([0-9a-f]{16})$/.exec(pathname);
+      if (dropFile && (method === 'GET' || method === 'HEAD')) {
+        if (store.get(dropFile[1])?.to !== ctx.drop.id) return sendJson(res, 404, { error: '항목을 찾을 수 없어요.' });
+        return download(req, res, url, dropFile[1]);
+      }
       if (pathname === '/api/upload' && method === 'POST') {
         drops.record(ctx.drop.id, Number(req.headers['content-length']) || 0);
         broadcastHost('drops', dropList());
@@ -323,13 +357,13 @@ export function createApp(options) {
         return postText(req, res, ctx);
       }
       rejectBody(req, res);
-      return sendJson(res, 403, { error: '받기 링크로는 보내기만 할 수 있어요.' });
+      return sendJson(res, 403, { error: '링크로는 보내기와 받기만 할 수 있어요.' });
     }
     if (pathname === '/api/drops' || pathname.startsWith('/api/drops/')) return dropsApi(req, res, url, ctx);
 
     if (peers && (await peers.handle(req, res, url, ctx))) return;
     if (pathname === '/api/session' && method === 'GET') return sendJson(res, 200, session(ctx, req));
-    if (pathname === '/api/items' && method === 'GET') return sendJson(res, 200, { items: store.list().map(publicItem) });
+    if (pathname === '/api/items' && method === 'GET') return sendJson(res, 200, { items: store.list().filter(visibleTo(ctx)).map(publicItem) });
     if (pathname === '/api/events' && method === 'GET') return events(req, res, ctx);
     if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
@@ -366,10 +400,12 @@ export function createApp(options) {
 
     let m;
     if ((m = /^\/api\/files\/([0-9a-f]{16})$/.exec(pathname)) && (method === 'GET' || method === 'HEAD')) {
+      if (!ctx.isHost && store.get(m[1])?.to) return sendJson(res, 404, { error: '항목을 찾을 수 없어요.' });
       return download(req, res, url, m[1]);
     }
     if ((m = /^\/api\/items\/([0-9a-f]{16})$/.exec(pathname)) && method === 'DELETE') {
       rejectBody(req, res);
+      if (!ctx.isHost && store.get(m[1])?.to) return sendJson(res, 404, { error: '항목을 찾을 수 없어요.' });
       return removeItem(res, m[1]);
     }
     if ((m = /^\/api\/items\/([0-9a-f]{16})\/(open|reveal)$/.exec(pathname)) && method === 'POST') {
@@ -416,14 +452,16 @@ export function createApp(options) {
 /** 받기 링크 목록 (PC 화면용). 링크 주소는 중계 서버를 설정했을 때만 만들 수 있다. */
   function dropList() {
     const base = relayUrl();
-    return drops.list().map(({ id, secret, label, createdAt, expiresAt, count, bytes }) => ({
+    return drops.list().map(({ id, name, pin, label, createdAt, expiresAt, count, bytes }) => ({
       id,
+      name,
+      pin, // PC 화면에서 다시 알려 줄 수 있게 보여 준다 (이 PC 안에만 있다)
       label,
       createdAt,
       expiresAt,
       count,
       bytes,
-      url: base ? `${base}/d/${self.id}#${id}.${secret}` : null,
+      url: base ? `${base}/${name}` : null,
     }));
   }
 
@@ -435,13 +473,13 @@ export function createApp(options) {
     }
     if (!drops) {
       rejectBody(req, res);
-      return sendJson(res, 404, { error: '받기 링크를 쓸 수 없어요.' });
+      return sendJson(res, 404, { error: '링크를 쓸 수 없어요.' });
     }
     if (url.pathname === '/api/drops' && req.method === 'GET') return sendJson(res, 200, { links: dropList() });
     if (url.pathname === '/api/drops' && req.method === 'POST') {
       if (!relayUrl()) {
         rejectBody(req, res);
-        return sendJson(res, 409, { error: '먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요. 받기 링크는 중계 서버를 거쳐요.' });
+        return sendJson(res, 409, { error: '먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요. 링크는 중계 서버를 거쳐요.' });
       }
       let body;
       try {
@@ -451,8 +489,11 @@ export function createApp(options) {
       }
       let link;
       try {
-        link = drops.create({ label: body.label, days: body.days });
+        link = drops.create({ label: body.label, name: body.name, pin: String(body.pin ?? ''), days: body.days });
+        // 이름은 중계 서버 안에서 겹치면 안 된다 (지인들과 같은 중계 서버를 함께 쓴다)
+        if (relayLinks) await relayLinks.claim(link.name, link.id);
       } catch (err) {
+        if (link) drops.remove(link.id);
         return sendJson(res, err.status || 400, { error: err.message });
       }
       const list = dropList();
@@ -462,7 +503,9 @@ export function createApp(options) {
     const m = /^\/api\/drops\/([0-9a-f]{16})$/.exec(url.pathname);
     if (m && req.method === 'DELETE') {
       rejectBody(req, res);
-      if (!drops.remove(m[1])) return sendJson(res, 404, { error: '이미 없는 링크예요.' });
+      const removed = drops.remove(m[1]);
+      if (!removed) return sendJson(res, 404, { error: '이미 없는 링크예요.' });
+      relayLinks?.release(removed.name);
       broadcastHost('drops', dropList());
       return sendEmpty(res);
     }
@@ -544,7 +587,7 @@ export function createApp(options) {
     const client = { res, isHost: ctx.isHost, device: ctx.device };
     clients.add(client);
     writeEvent(res, 'snapshot', {
-      items: store.list().map(publicItem),
+      items: store.list().filter(visibleTo(ctx)).map(publicItem),
       presence: presence(),
       ...(ctx.isHost && peers ? peers.snapshot() : {}),
     });
@@ -565,6 +608,15 @@ export function createApp(options) {
 
   // ---- 항목 관리 ----
 
+  /** 그 요청이 볼 수 있는 항목: PC 화면은 전부, 휴대폰·다른 PC는 링크 상대에게 보낸 것을 뺀 나머지 */
+  const visibleTo = (ctx) => (item) => ctx.isHost || !item.to;
+
+  /** PC 화면에서 링크 상대에게 보낼 때 (?to=<링크 번호>): 살아 있는 링크인지 */
+  function linkTarget(ctx, to) {
+    if (!ctx.isHost || to === undefined || to === null || to === '') return { to: null };
+    return drops?.active(String(to)) ? { to: String(to) } : { error: '그 링크는 꺼졌거나 기간이 지났어요.' };
+  }
+
   async function cleanupItem(item) {
     if (item.kind !== 'file' || item.from !== 'host') return;
     const dir = path.dirname(item.path);
@@ -577,7 +629,8 @@ export function createApp(options) {
       cleanupItem(old);
       broadcast('remove', { id: old.id });
     }
-    broadcast('add', publicItem(item));
+    // 링크 상대에게 보낸 것은 PC 화면에만 알린다 (그 사람은 링크 화면에서 따로 받아 간다)
+    for (const client of clients) if (!item.to || client.isHost) writeEvent(client.res, 'add', publicItem(item));
     log('add', item);
   }
 
@@ -598,6 +651,11 @@ export function createApp(options) {
         return sendJson(res, 413, { error: '텍스트가 너무 길어요.' });
       }
       return addText(res, ctx, text);
+    }
+    const target = linkTarget(ctx, url.searchParams.get('to'));
+    if (target.error) {
+      rejectBody(req, res);
+      return sendJson(res, 410, { error: target.error });
     }
     const name = rawName === null ? autoName(ctx.device, type) : sanitizeFilename(rawName);
     const lastModified = Number(url.searchParams.get('lastModified'));
@@ -659,6 +717,7 @@ export function createApp(options) {
       size,
       path: finalPath,
       createdAt: Date.now(),
+      ...(target.to ? { to: target.to } : {}),
     };
     addItem(item);
     return sendJson(res, 201, publicItem(item));
@@ -672,10 +731,12 @@ export function createApp(options) {
       if (err.code === 'TOO_LARGE') return sendJson(res, 413, { error: '텍스트가 너무 길어요. 파일로 보내 주세요.' });
       return sendJson(res, 400, { error: '잘못된 요청이에요.' });
     }
-    return addText(res, ctx, typeof body?.text === 'string' ? body.text : '');
+    const target = linkTarget(ctx, body?.to);
+    if (target.error) return sendJson(res, 410, { error: target.error });
+    return addText(res, ctx, typeof body?.text === 'string' ? body.text : '', target.to);
   }
 
-  function addText(res, ctx, raw) {
+  function addText(res, ctx, raw, to = null) {
     const text = raw.replace(/\r\n?/g, '\n');
     if (!text.trim()) return sendJson(res, 400, { error: '보낼 내용이 없어요.' });
     if (text.length > MAX_TEXT) return sendJson(res, 413, { error: '텍스트가 너무 길어요. 파일로 보내 주세요.' });
@@ -687,6 +748,7 @@ export function createApp(options) {
       device: ctx.device,
       text,
       createdAt: Date.now(),
+      ...(to ? { to } : {}),
     };
     addItem(item);
     return sendJson(res, 201, publicItem(item));

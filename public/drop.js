@@ -1,18 +1,56 @@
-// 받기 링크 화면: 쏙이 없는 사람이 링크(https://<중계 서버>/d/<PC 번호>#<링크 번호>.<비밀 열쇠>)를 열어
-// 그 PC로 파일·텍스트를 보낸다. 중계 서버를 거치지만 내용은 받는 PC와의 사이에서 종단간 암호화된다 (relay.js).
-// 받는 PC는 이 링크로 온 요청에 보내기만 허락한다 (목록·받기는 안 됨).
-import { RelayClient, fromHex } from './relay.js';
+// 링크 화면 (https://<중계 서버>/<링크 이름>, 예: ssok.example.com/minsu):
+// 쏙이 없는 사람이 비밀번호를 넣고 그 PC로 보내거나, 그 PC가 보내 준 것을 받아 간다.
+// 중계 서버를 거치지만, 열쇠는 이 브라우저와 그 PC가 그 자리에서 만들고(ECDH) 비밀번호는 암호화된 통로 안에서만 보낸다.
+import { RelayClient } from './relay.js';
 
 const APP_ID = '{{APP_ID}}';
 const $ = (id) => document.getElementById(id);
+const SVG = 'http://www.w3.org/2000/svg';
 
-const pcId = /^\/d\/([0-9a-f]{16})\/?$/.exec(location.pathname)?.[1] ?? null;
-const [linkId = '', secretHex = ''] = location.hash.slice(1).split('.');
-const valid = Boolean(pcId) && /^[0-9a-f]{16}$/.test(linkId) && /^[0-9a-f]{64}$/.test(secretHex);
+const linkName = location.pathname.replace(/^\/|\/$/g, '').toLowerCase();
+const PIN_KEY = `${APP_ID}.pin.${linkName}`;
+const store = {
+  get: () => {
+    try {
+      return localStorage.getItem(PIN_KEY);
+    } catch {
+      return null;
+    }
+  },
+  set: (value) => {
+    try {
+      if (value) localStorage.setItem(PIN_KEY, value);
+      else localStorage.removeItem(PIN_KEY);
+    } catch {
+      // 저장하지 못하면 다음에 다시 묻는다
+    }
+  },
+};
 
+let target = null; // { pcId, linkId }
+let pin = store.get();
 let connection = null;
-let pcName = '받는 PC';
-let current = null; // 보내는 중인 것 { abort: AbortController }
+let pcName = '상대 PC';
+let current = null; // 보내는 중 { abort }
+let inboxTimer = null;
+const downloaded = new Set();
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function icon(id, className = 'icon') {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('class', className);
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS(SVG, 'use');
+  use.setAttribute('href', `#${id}`);
+  svg.append(use);
+  return svg;
+}
 
 function setStatus(state, text) {
   $('status').dataset.state = state;
@@ -20,44 +58,47 @@ function setStatus(state, text) {
 }
 
 function toast(message, type = '') {
-  const node = document.createElement('div');
-  node.className = `toast ${type}`.trim();
+  const node = el('div', `toast ${type}`.trim());
   node.setAttribute('role', type === 'error' ? 'alert' : 'status');
-  const span = document.createElement('span');
-  span.textContent = message;
-  node.append(span);
+  node.append(el('span', '', message));
   $('toasts').append(node);
   while ($('toasts').children.length > 2) $('toasts').firstElementChild.remove();
   setTimeout(() => node.remove(), type === 'error' ? 6000 : 3000);
 }
 
+function show(...ids) {
+  for (const id of ['pin-form', 'drop-ready', 'drop-main', 'transfer', 'inbox-card', 'locked']) $(id).hidden = !ids.includes(id);
+}
+
 function showLocked(title, text) {
-  for (const id of ['drop-ready', 'drop-main', 'transfer']) $(id).hidden = true;
-  $('locked').hidden = false;
+  show('locked');
   $('locked-title').textContent = title;
   $('locked-text').textContent = text;
 }
 
-function showReady() {
-  $('locked').hidden = true;
-  $('drop-ready').hidden = false;
-  $('drop-main').hidden = false;
-  $('drop-title').textContent = `${pcName}에게 보내기`;
-  document.title = `${pcName}에게 보내기`;
-  setStatus('online', '연결됨');
+function askPin(error = '') {
+  clearInterval(inboxTimer);
+  show('pin-form');
+  setStatus('waiting', '비밀번호 필요');
+  $('pin-error').hidden = !error;
+  $('pin-error').textContent = error;
+  $('pin-input').value = '';
+  $('pin-input').focus();
 }
 
 const expired = () => {
+  clearInterval(inboxTimer);
   setStatus('offline', '쓸 수 없는 링크');
   showLocked('이 링크는 꺼졌거나 기간이 지났어요', '링크를 보낸 사람에게 새 링크를 달라고 해 주세요.');
 };
 
 function connect() {
-  connection ??= RelayClient.connect(`wss://${location.host}/ws/c/${pcId}`, fromHex(secretHex), {
-    kid: `d:${linkId}`,
+  connection ??= RelayClient.connect(`wss://${location.host}/ws/c/${target.pcId}`, 'ecdh', {
+    kid: `d:${target.linkId}`,
+    auth: { pin: pin ?? '' },
     onClose: () => {
       connection = null;
-      if (!current) setStatus('waiting', '잠시 끊김 · 보낼 때 다시 연결해요');
+      if (!current && !$('drop-main').hidden) setStatus('waiting', '잠시 끊김 · 다시 연결해요');
     },
   }).catch((err) => {
     connection = null;
@@ -66,34 +107,161 @@ function connect() {
   return connection;
 }
 
-/** 받는 PC와 연결하고 이름을 받아 온다. PC가 꺼져 있으면 켜질 때까지 가끔 다시 해 본다. */
-async function start() {
-  if (!valid) {
-    setStatus('offline', '잘못된 링크');
-    return showLocked('링크가 올바르지 않아요', '받은 링크 전체(# 뒤까지)를 그대로 열어 주세요.');
+function closeConnection() {
+  connection?.then((c) => c.close(), () => {});
+  connection = null;
+}
+
+/** 링크 요청의 답이 '비밀번호 틀림·막힘·꺼짐'이면 화면을 바꾸고 true */
+async function handleDenied(res) {
+  if (res.status !== 401 && res.status !== 410) return false;
+  let code = res.status === 410 ? 'gone' : 'wrong';
+  try {
+    code = (await res.json()).code || code;
+  } catch {
+    // 기본값
   }
+  closeConnection();
+  if (code === 'gone') expired();
+  else if (code === 'locked') {
+    clearInterval(inboxTimer);
+    setStatus('offline', '잠시 막힘');
+    showLocked('비밀번호를 너무 많이 틀렸어요', '10분 뒤에 이 화면을 새로 고쳐 다시 해 주세요.');
+  } else {
+    const hadPin = Boolean(pin);
+    pin = null;
+    store.set(null);
+    askPin(hadPin ? '비밀번호가 맞지 않아요.' : '');
+  }
+  return true;
+}
+
+/** 링크를 찾고, 그 PC와 연결해 이름을 받아 온다. PC가 꺼져 있으면 켜질 때까지 가끔 다시 해 본다. */
+async function start() {
+  if (!/^[a-z0-9-]{3,30}$/.test(linkName)) return showLocked('링크가 올바르지 않아요', '받은 주소를 그대로 열어 주세요.');
   for (;;) {
     try {
+      if (!target) {
+        const res = await fetch(`/api/link/${encodeURIComponent(linkName)}`, { cache: 'no-store' });
+        if (res.status === 404) {
+          setStatus('offline', '없는 링크');
+          return showLocked('이 링크를 찾을 수 없어요', '주소를 다시 확인하거나, 링크를 보낸 사람에게 물어봐 주세요.');
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        target = await res.json();
+      }
+      if (!pin) return askPin();
       const client = await connect();
       const res = await client.request('GET', '/api/drop-info');
-      if (res.status === 401 || res.status === 410) return expired();
+      if (await handleDenied(res)) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       pcName = (await res.json()).name || pcName;
-      return showReady();
+      store.set(pin);
+      return ready();
     } catch (err) {
       if (err.code === 'UNKNOWN_PEER') return expired();
-      setStatus('offline', '받는 PC에 연결하지 못함');
-      showLocked('받는 PC가 꺼져 있는 것 같아요', '그 PC가 켜지면 이 화면이 저절로 열려요.');
+      setStatus('offline', '상대 PC에 연결하지 못함');
+      showLocked('상대 PC가 꺼져 있는 것 같아요', '그 PC가 켜지면 이 화면이 저절로 열려요.');
       await new Promise((r) => setTimeout(r, document.hidden ? 30_000 : 8000));
     }
   }
 }
 
-async function errorOf(res) {
-  if (res.status === 401 || res.status === 410) {
-    expired();
-    return '이 링크는 꺼졌거나 기간이 지났어요.';
+/** '거실PC와', '민수 노트북과': 받침이 있으면 '과' */
+function withWa(name) {
+  const code = name.trim().slice(-1).charCodeAt(0);
+  const batchim = code >= 0xac00 && code <= 0xd7a3 ? (code - 0xac00) % 28 !== 0 : /[lmnr]$/i.test(name.trim());
+  return `${name}${batchim ? '과' : '와'}`;
+}
+
+function ready() {
+  show('drop-ready', 'drop-main');
+  $('drop-title').textContent = `${withWa(pcName)} 주고받기`;
+  document.title = `${pcName} · 주고받기`;
+  $('inbox-title').textContent = `${pcName}에서 받은 것`;
+  setStatus('online', '연결됨');
+  refreshInbox();
+  clearInterval(inboxTimer);
+  inboxTimer = setInterval(() => !document.hidden && !current && refreshInbox(), 8000);
+}
+
+// ---- 받은 것 (그 PC가 이 링크로 보낸 것) ----
+async function refreshInbox() {
+  try {
+    const client = await connect();
+    const res = await client.request('GET', '/api/drop-items');
+    if (await handleDenied(res)) return;
+    if (!res.ok) return;
+    renderInbox((await res.json()).items);
+    if ($('locked').hidden && !current) setStatus('online', '연결됨');
+  } catch {
+    // 다음 확인 때 다시
   }
+}
+
+function renderInbox(items) {
+  $('inbox-card').hidden = items.length === 0;
+  $('inbox').replaceChildren(
+    ...items.map((item) => {
+      const li = el('li');
+      if (item.kind === 'text') {
+        li.append(icon('i-text'), el('span', 'text', item.text));
+        const copy = el('button', 'btn small', '복사');
+        copy.type = 'button';
+        copy.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(item.text);
+            toast('복사했어요.');
+          } catch {
+            toast('복사하지 못했어요. 글자를 길게 눌러 복사해 주세요.', 'error');
+          }
+        });
+        li.append(copy);
+      } else {
+        li.append(icon('i-file'), el('span', 'name', item.name), el('span', 'muted small', formatSize(item.size)));
+        const get = el('button', downloaded.has(item.id) ? 'btn small' : 'btn small primary', downloaded.has(item.id) ? '다시 받기' : '받기');
+        get.type = 'button';
+        get.addEventListener('click', () => downloadItem(item, get));
+        li.append(get);
+      }
+      return li;
+    }),
+  );
+}
+
+async function downloadItem(item, button) {
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = '받는 중…';
+  try {
+    const client = await connect();
+    const res = await client.request('GET', `/api/drop-files/${item.id}`);
+    if (await handleDenied(res)) return;
+    if (!res.ok) throw new Error('받지 못했어요.');
+    const blob = await res.blob(item.mime);
+    const url = URL.createObjectURL(blob);
+    const a = el('a');
+    a.href = url;
+    a.download = item.name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    downloaded.add(item.id);
+    button.textContent = '다시 받기';
+    button.className = 'btn small';
+    toast(`받았어요 (${formatSize(blob.size)}).`);
+  } catch (err) {
+    button.textContent = label;
+    toast(err.code ? '연결이 끊겼어요. 다시 해 주세요.' : err.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// ---- 보내기 ----
+async function errorOf(res) {
+  if (await handleDenied(res)) return '이 링크로는 더 보낼 수 없어요.';
   try {
     return (await res.json()).error || '보내지 못했어요.';
   } catch {
@@ -102,7 +270,7 @@ async function errorOf(res) {
 }
 
 function formatSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];
   let value = bytes / 1024;
   let i = 0;
@@ -114,23 +282,16 @@ function formatSize(bytes) {
 }
 
 function addSent(label, iconId) {
-  const li = document.createElement('li');
-  li.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#${iconId}"/></svg>`;
-  const name = document.createElement('span');
-  name.className = 'name';
-  name.textContent = label;
-  const check = document.createElement('span');
-  check.className = 'muted small';
-  check.textContent = '보냄';
-  li.append(name, check);
+  const li = el('li');
+  li.append(icon(iconId, 'icon sent-icon'), el('span', 'name', label), el('span', 'muted small', '보냄'));
   $('sent').prepend(li);
   $('sent-card').hidden = false;
 }
 
 /** 파일을 하나씩 보낸다 (진행률 표시, 취소 가능) */
 async function sendFiles(files) {
-  const list = [...files].filter((f) => f.size >= 0);
-  if (!list.length || current) return;
+  const list = [...files];
+  if (!list.length || current || $('drop-main').hidden) return;
   const total = list.reduce((n, f) => n + f.size, 0);
   let done = 0;
   current = { abort: null };
@@ -157,7 +318,7 @@ async function sendFiles(files) {
       });
       if (!res.ok) throw new Error(await errorOf(res));
       done += file.size;
-      addSent(file.name, 'i-file');
+      addSent(file.name, 'i-check');
     }
     toast(list.length > 1 ? `${list.length}개를 보냈어요.` : '보냈어요.');
   } catch (err) {
@@ -166,7 +327,7 @@ async function sendFiles(files) {
   } finally {
     current = null;
     $('transfer').hidden = true;
-    if ($('locked').hidden) setStatus('online', '연결됨');
+    if ($('locked').hidden && $('pin-form').hidden) setStatus('online', '연결됨');
   }
 }
 
@@ -177,11 +338,20 @@ async function sendText(text) {
     body: JSON.stringify({ text }),
   });
   if (!res.ok) throw new Error(await errorOf(res));
-  addSent(text.replace(/\s+/g, ' ').slice(0, 80), 'i-text');
+  addSent(text.replace(/\s+/g, ' ').slice(0, 80), 'i-check');
   toast('보냈어요.');
 }
 
 // ---- 화면 ----
+$('pin-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  pin = $('pin-input').value.trim();
+  if (!pin) return;
+  closeConnection(); // 새 비밀번호로 다시 연결한다
+  setStatus('connecting', '확인 중…');
+  start();
+});
+
 for (const id of ['pick-media', 'pick-file', 'pick-any']) {
   $(id).addEventListener('change', (e) => {
     sendFiles(e.target.files);
@@ -231,15 +401,18 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   document.body.classList.remove('dragging');
-  if (!$('drop-main').hidden && e.dataTransfer?.files?.length) sendFiles(e.dataTransfer.files);
+  if (e.dataTransfer?.files?.length) sendFiles(e.dataTransfer.files);
 });
 document.addEventListener('paste', (e) => {
-  if (e.target === input || $('drop-main').hidden) return;
+  if (e.target === input || e.target === $('pin-input') || $('drop-main').hidden) return;
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) {
     e.preventDefault();
     sendFiles(files.map((f) => (f.name && f.name !== 'image.png' ? f : new File([f], `캡처 ${new Date().toLocaleString('sv-SE').replace(/[: ]/g, '-')}.png`, { type: f.type }))));
   }
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !$('drop-main').hidden) refreshInbox();
 });
 
 start();

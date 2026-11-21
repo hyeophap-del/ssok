@@ -44,6 +44,17 @@ export async function deriveKeys(secret, phoneNonce, pcNonce) {
   return { phoneToPc: await importAes(bits.slice(0, 32)), pcToPhone: await importAes(bits.slice(32)) };
 }
 
+// 링크(ssok.example.com/minsu)처럼 주소에 비밀 열쇠가 없을 때: 양쪽이 그 자리에서 만든 ECDH 열쇠로 비밀 값을 만든다.
+// 중계 서버가 엿보기만 해서는 풀 수 없다. 받을 자격은 그 안에서 보내는 비밀번호로 PC가 확인한다.
+const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
+const ecdhPair = () => subtle().generateKey(ECDH, true, ['deriveBits']);
+const ecdhPublic = async (pair) => toHex(new Uint8Array(await subtle().exportKey('raw', pair.publicKey)));
+async function ecdhShared(pair, theirHex) {
+  if (!/^04[0-9a-f]{128}$/i.test(theirHex || '')) throw new Error('잘못된 인사');
+  const theirs = await subtle().importKey('raw', fromHex(theirHex), ECDH, false, []);
+  return new Uint8Array(await subtle().deriveBits({ name: 'ECDH', public: theirs }, pair.privateKey, 256));
+}
+
 function iv(counter) {
   const out = new Uint8Array(12);
   new DataView(out.buffer).setBigUint64(4, counter);
@@ -91,11 +102,19 @@ export class SecureSocket {
     ws.onerror = () => {};
   }
 
-  /** 휴대폰 쪽: 인사를 먼저 보낸다 */
-  async start(extra = {}) {
-    this.extra = extra;
+  /**
+   * 휴대폰 쪽: 인사를 먼저 보낸다. extra는 인사(평문)에, authExtra는 암호화된 첫 메시지에만 넣는다 (비밀번호 등).
+   * secret이 'ecdh'면 비밀 열쇠 대신 그 자리에서 ECDH로 만든다.
+   */
+  async start(extra = {}, authExtra = {}) {
+    this.extra = { ...extra, ...authExtra };
     this.myNonce = randomBytes(16);
-    this.ws.send(JSON.stringify({ t: 'hello', v: 1, n: toHex(this.myNonce), ...extra }));
+    let e;
+    if (this.secret === 'ecdh') {
+      this.ecdh = await ecdhPair();
+      e = await ecdhPublic(this.ecdh);
+    }
+    this.ws.send(JSON.stringify({ t: 'hello', v: 1, n: toHex(this.myNonce), ...extra, ...(e ? { e } : {}) }));
     return this.ready;
   }
 
@@ -145,7 +164,7 @@ export class SecureSocket {
     if (theirNonce.length !== 16) throw new Error('잘못된 인사');
     if (this.role === 'pc') {
       // 휴대폰은 QR의 비밀 열쇠를, 연결된 다른 PC는 자기 번호(kid)를 밝히고 그 PC와 나눠 가진 열쇠를 쓴다
-      const secret = typeof this.secret === 'function' ? this.secret(msg) : this.secret;
+      let secret = typeof this.secret === 'function' ? this.secret(msg) : this.secret;
       if (!secret) {
         try {
           this.ws.send(JSON.stringify({ t: 'error', code: 'unknown-peer', message: '이 PC와 연결이 해제됐어요. 다시 연결해 주세요.' }));
@@ -154,12 +173,19 @@ export class SecureSocket {
         }
         throw Object.assign(new Error('모르는 기기예요'), { code: 'UNKNOWN_PEER' });
       }
+      let e;
+      if (secret === 'ecdh') {
+        const pair = await ecdhPair();
+        secret = await ecdhShared(pair, msg.e);
+        e = await ecdhPublic(pair);
+      }
       this.myNonce = randomBytes(16);
-      this.ws.send(JSON.stringify({ t: 'hello', v: 1, n: toHex(this.myNonce) }));
+      this.ws.send(JSON.stringify({ t: 'hello', v: 1, n: toHex(this.myNonce), ...(e ? { e } : {}) }));
       this.keys = await deriveKeys(secret, theirNonce, this.myNonce);
       this.hello = msg;
     } else {
-      this.keys = await deriveKeys(this.secret, this.myNonce, theirNonce);
+      const secret = this.ecdh ? await ecdhShared(this.ecdh, msg.e) : this.secret;
+      this.keys = await deriveKeys(secret, this.myNonce, theirNonce);
       await this.send(FRAME.AUTH, 0, this.extra || {});
     }
   }
@@ -224,7 +250,7 @@ export class SecureSocket {
  *   const res = await pc.request('GET', '/api/session');  →  { status, headers, json(), text(), blob() }
  */
 export class RelayClient {
-  static async connect(url, secret, { WebSocketImpl = globalThis.WebSocket, device = '', kid = null, onClose } = {}) {
+  static async connect(url, secret, { WebSocketImpl = globalThis.WebSocket, device = '', kid = null, auth = {}, onClose } = {}) {
     const ws = new WebSocketImpl(url);
     await new Promise((resolve, reject) => {
       ws.onopen = resolve;
@@ -245,7 +271,8 @@ export class RelayClient {
         onClose?.(err);
       },
     });
-    await client.socket.start({ device, ...(kid ? { kid } : {}) }); // kid: 연결된 다른 PC가 보낼 때 자기 번호
+    // kid: 연결된 다른 PC(자기 번호), 링크(d:<링크 번호>) 등 어떤 열쇠로 들어가는지. auth: 암호화된 첫 메시지에만 (비밀번호)
+    await client.socket.start({ device, ...(kid ? { kid } : {}) }, auth);
     return client;
   }
 

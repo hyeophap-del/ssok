@@ -158,17 +158,42 @@ function setupDrops() {
   if (!state.session.drops) return;
   $('drops-card').hidden = false;
   renderDrops();
+  const openForm = (open) => {
+    $('drop-form').hidden = !open;
+    $('drop-new').hidden = open;
+    if (!open) return;
+    $('drop-host').textContent = `${state.session.relay?.host ?? ''}/`;
+    $('drop-pin').value = String(Math.floor(Math.random() * 10_000)).padStart(4, '0'); // 바꿔도 된다
+    $('drop-label').focus();
+  };
+  $('drop-new').addEventListener('click', () => openForm(true));
+  $('drop-cancel').addEventListener('click', () => openForm(false));
+  $('drop-label').addEventListener('input', () => {
+    // 이름을 영문으로 쓰면 주소도 같이 채워 준다 (직접 고칠 수 있다)
+    if ($('drop-name').dataset.touched) return;
+    const guess = $('drop-label').value.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+    $('drop-name').value = guess.length >= 3 ? guess.slice(0, 30) : '';
+  });
+  $('drop-name').addEventListener('input', () => ($('drop-name').dataset.touched = '1'));
   $('drop-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const button = e.target.querySelector('button');
+    const button = e.target.querySelector('button[type=submit]');
     button.disabled = true;
     try {
       const link = await api('/api/drops', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: $('drop-label').value, days: Number($('drop-days').value) }),
+        body: JSON.stringify({
+          label: $('drop-label').value,
+          name: $('drop-name').value.trim().toLowerCase(),
+          pin: $('drop-pin').value.trim(),
+          days: Number($('drop-days').value),
+        }),
       });
       $('drop-label').value = '';
+      $('drop-name').value = '';
+      delete $('drop-name').dataset.touched;
+      openForm(false);
       await copyDropLink(link, true);
     } catch (err) {
       showError(err);
@@ -183,10 +208,10 @@ function setupDrops() {
     if (!link) return;
     if (e.target.closest('[data-copy]')) return copyDropLink(link);
     if (e.target.closest('[data-off]')) {
-      if (!confirm(`‘${link.label}’ 받기 링크를 끌까요? 이 링크로는 더 보낼 수 없게 돼요.`)) return;
+      if (!confirm(`‘${link.label}’ 링크를 끌까요? 이 링크로는 더 주고받을 수 없게 돼요.`)) return;
       try {
         await api(`/api/drops/${link.id}`, { method: 'DELETE' });
-        toast('받기 링크를 껐어요.');
+        toast('링크를 껐어요.');
       } catch (err) {
         showError(err);
       }
@@ -196,11 +221,12 @@ function setupDrops() {
 
 async function copyDropLink(link, created = false) {
   if (!link.url) return toast('어디서나(중계 서버)가 꺼져 있어 링크를 만들 수 없어요.', 'error');
+  const message = `${link.url}\n비밀번호: ${link.pin}`;
   try {
-    await navigator.clipboard.writeText(link.url);
-    toast(created ? `‘${link.label}’ 받기 링크를 만들고 복사했어요. 카카오톡 등으로 보내 주세요.` : '링크를 복사했어요.');
+    await navigator.clipboard.writeText(message);
+    toast(created ? `‘${link.label}’ 링크를 만들고 주소와 비밀번호를 복사했어요. 카카오톡 등으로 보내 주세요.` : '링크 주소와 비밀번호를 복사했어요.');
   } catch {
-    prompt('이 링크를 복사해서 보내 주세요', link.url);
+    prompt('이 주소와 비밀번호를 보내 주세요', message.replace('\n', ' '));
   }
 }
 
@@ -208,14 +234,16 @@ function renderDrops() {
   const links = state.session.drops || [];
   const relayOn = Boolean(state.session.relay?.url);
   $('drops-off').hidden = relayOn;
-  $('drop-form').hidden = !relayOn;
+  $('drop-new').hidden = !relayOn || !$('drop-form').hidden;
+  if (!relayOn) $('drop-form').hidden = true;
   $('drops').replaceChildren(
     ...links.map((link) => {
-      const days = Math.max(1, Math.ceil((link.expiresAt - Date.now()) / 86_400_000));
+      const left = link.expiresAt === null ? '끌 때까지' : `${Math.max(1, Math.ceil((link.expiresAt - Date.now()) / 86_400_000))}일 남음`;
       const info = el('div', { class: 'drop-info' });
       info.append(
         el('div', { class: 'drop-name', title: link.label }, link.label),
-        el('div', { class: 'muted' }, `${days}일 남음${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
+        el('div', { class: 'drop-sub', title: link.url ?? link.name }, `${link.url ? link.url.replace(/^https:\/\//, '') : link.name} · 비밀번호 ${link.pin}`),
+        el('div', { class: 'muted' }, `${left}${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
       );
       const row = el('li', { class: 'drop-row', 'data-drop': link.id });
       row.append(
@@ -382,6 +410,7 @@ const EVENT_HANDLERS = {
     if (!state.session?.isHost) return;
     state.session.drops = links;
     renderDrops();
+    renderTargets(); // 링크 상대도 보낼 곳에 나온다
   },
   relay: (info) => {
     if (!state.session?.isHost) return;
@@ -659,6 +688,7 @@ function renderItem(item) {
 }
 
 function routeLabel(item) {
+  if (state.session.isHost && item.to) return `${(state.session.drops || []).find((l) => l.id === item.to)?.label ?? '링크'}에게 보냄 (링크)`;
   if (state.session.isHost) return item.from === 'host' ? '휴대폰으로 보냄' : `${item.device || '휴대폰'}에서 받음`;
   if (item.from === 'peer') return `${item.device} → PC`;
   return item.from === 'host' ? 'PC에서 받음' : 'PC로 보냄';
@@ -804,10 +834,11 @@ function setupTextForm() {
     button.disabled = true;
     const peer = state.session.isHost ? currentTarget() : null;
     try {
-      await api(peer ? `/api/peers/${peer.id}/text` : '/api/text', {
+      const toLink = peer?.kind === 'link';
+      await api(peer && !toLink ? `/api/peers/${peer.id}/text` : '/api/text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify(toLink ? { text, to: peer.id } : { text }),
       });
       input.value = '';
       grow();
@@ -904,8 +935,9 @@ function uploadFile(file, target, onProgress) {
     transfer.xhr = xhr;
     const params = new URLSearchParams({ name: file.name || 'file' });
     if (file.lastModified) params.set('lastModified', String(file.lastModified));
-    // 다른 PC로 보낼 때는 이 PC의 프로그램이 받아서 그대로 그 PC로 흘려보낸다
-    xhr.open('POST', `${target ? `/api/peers/${target.id}/upload` : '/api/upload'}?${params}`);
+    // 다른 PC로 보낼 때는 이 PC의 프로그램이 받아서 그대로 그 PC로 흘려보낸다. 링크 상대에게는 이 PC에 두고 그 사람이 받아 간다.
+    if (target?.kind === 'link') params.set('to', target.id);
+    xhr.open('POST', `${target && target.kind !== 'link' ? `/api/peers/${target.id}/upload` : '/api/upload'}?${params}`);
     xhr.setRequestHeader('X-Requested-With', APP_ID);
     xhr.upload.addEventListener('progress', (e) => onProgress(e.loaded));
     xhr.addEventListener('load', () => {
@@ -1225,10 +1257,17 @@ let earlyPairResult = null; // 연결 요청 응답보다 결과 알림이 먼�
 
 const peerById = (id) => state.peers.find((p) => p.id === id);
 
-/** 지금 보낼 곳이 연결된 PC면 그 PC, 휴대폰이면 null */
+/** 지금 보낼 곳: 연결된 PC면 그 PC, 링크 상대면 { kind: 'link', id, name }, 휴대폰이면 null */
 function currentTarget() {
+  const link = currentLink();
+  if (link) return { kind: 'link', id: link.id, name: link.label };
   const peer = peerById(state.target);
   return peer?.paired && peer.kind === 'pc' ? peer : null;
+}
+
+function currentLink() {
+  const m = /^link:([0-9a-f]{16})$/.exec(state.target || '');
+  return m ? ((state.session.drops || []).find((l) => l.id === m[1]) ?? null) : null;
 }
 
 function setTarget(id) {
@@ -1290,17 +1329,24 @@ function renderPeers() {
 function renderTargets() {
   const peer = currentTarget();
   const paired = state.peers.filter((p) => p.paired && p.kind === 'pc');
+  const links = state.session.drops || [];
   const add = el('button', { type: 'button', class: 'chip add', 'data-add': '' });
   add.append(icon('i-plus'), el('span', {}, paired.length ? 'PC 추가' : '다른 PC'));
   $('targets').replaceChildren(
     targetChip('phone', 'i-phone', '휴대폰', undefined, !peer),
     ...paired.map((p) => targetChip(p.id, 'i-pc', p.name, p.online, peer?.id === p.id, p.via)),
+    ...links.map((l) => targetChip(`link:${l.id}`, 'i-link', l.label, undefined, peer?.kind === 'link' && peer.id === l.id)),
     add,
   );
 
-  const offline = Boolean(peer && !peer.online);
+  const offline = Boolean(peer && peer.kind !== 'link' && !peer.online);
   $('dropzone').classList.toggle('offline', offline);
-  if (peer) {
+  if (peer?.kind === 'link') {
+    const link = currentLink();
+    $('dropzone-title').textContent = `${peer.name}에게 보낼 파일을 여기에 끌어다 놓으세요`;
+    $('dropzone-hint').textContent = `링크(${link.url ? link.url.replace(/^https:\/\//, '') : link.name})로 ${peer.name}에게 가요. 받아 갈 수 있게 이 PC를 켜 두세요.`;
+    $('text-input').placeholder = `${peer.name}에게 보낼 텍스트나 링크`;
+  } else if (peer) {
     $('dropzone-title').textContent = `${peer.name}에 보낼 파일을 여기에 끌어다 놓으세요`;
     $('dropzone-hint').textContent = offline
       ? peer.relay

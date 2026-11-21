@@ -12,8 +12,9 @@ const METHODS = new Set(['GET', 'HEAD', 'POST', 'DELETE']);
 // 연결된 다른 PC가 중계로 쓸 수 있는 것: 파일·텍스트 보내기, 연결 해제, 중계 주소 확인 (휴대폰 권한은 주지 않는다)
 const PEER_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
 const PEER_ID = /^[0-9a-f]{16}$/;
-// 받기 링크로 온 사람(쏙이 없는 사람)이 쓸 수 있는 것: 보내기와 받는 PC 이름 확인만
-const DROP_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'GET /api/drop-info']);
+// 링크로 온 사람(쏙이 없는 사람)이 쓸 수 있는 것: 보내기, 받는 PC 이름 확인, 이 PC가 그 사람에게 보낸 것 받기
+const DROP_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'GET /api/drop-info', 'GET /api/drop-items']);
+const DROP_FILE = /^\/api\/drop-files\/[0-9a-f]{16}$/;
 const DROP_KID = /^d:([0-9a-f]{16})$/;
 
 const pick = (headers, names) => Object.fromEntries(names.filter((n) => headers[n] !== undefined).map((n) => [n, String(headers[n])]));
@@ -32,7 +33,8 @@ const decode = (bytes) => new TextDecoder().decode(bytes);
  * @param {(status: {state: string, error?: string}) => void} [options.onStatus]
  * @param {(peerId: string) => ({secret: Uint8Array, key: string} | null)} [options.peerLookup]
  *        연결된 다른 PC가 중계로 들어올 때: 그 PC와 나눠 가진 열쇠와, 그 PC가 이 PC에 내미는 키
- * @param {(linkId: string) => ({secret: Uint8Array} | null)} [options.dropLookup]  받기 링크의 비밀 열쇠 (꺼졌거나 기간이 지났으면 null)
+ * @param {(linkId: string) => (object | null)} [options.dropLookup]  링크가 살아 있는지 (꺼졌거나 기간이 지났으면 null)
+ * @param {() => {name: string, linkId: string}[]} [options.links]  이 PC의 링크 이름들 (중계 서버에 연결할 때마다 다시 알려 준다)
  * @param {Set<number>} [options.tunnelPorts]  그대로 통과시키는 연결이 이 PC의 쏙에 붙은 포트 (쏙이 'PC 화면'이 아닌 바깥 요청으로 대한다)
  */
 export function startRelayClient({
@@ -49,6 +51,7 @@ export function startRelayClient({
   onStatus = () => {},
   peerLookup = () => null,
   dropLookup = () => null,
+  links = () => [],
   tunnelPorts = new Set(),
   log = () => {},
   WebSocketImpl = globalThis.WebSocket,
@@ -62,6 +65,8 @@ export function startRelayClient({
   let lastHeard = 0; // 중계 서버에서 마지막으로 무언가 받은 때
   let pairCode = null; // 다른 곳의 PC가 처음 연결할 때 쓰는 코드 { code, expires } (이 PC가 만들었을 때만)
   let pairCodeWaiter = null;
+  const waiters = new Map(); // 중계 서버의 답을 기다리는 요청 (번호 → 받을 함수)
+  let nextRid = 1;
   const sessions = new Set();
   let status = { state: 'connecting' };
   const setStatus = (next) => {
@@ -92,12 +97,15 @@ export function startRelayClient({
       if (msg.t === 'ok') {
         retryMs = 3000;
         setStatus({ state: 'connected' });
+        ws.send(JSON.stringify({ t: 'link-sync', links: links() }));
       } else if (msg.t === 'error') {
         // 초대 코드가 틀렸거나 막힌 경우: 금방 다시 해도 소용없으니 천천히 다시 시도한다
         retryMs = 60_000;
         setStatus({ state: 'error', error: msg.message || '중계 서버가 연결을 거절했어요.' });
       } else if (msg.t === 'incoming' && typeof msg.sid === 'string') {
         accept(msg.sid);
+      } else if (msg.t === 'link-claim' && waiters.has(msg.rid)) {
+        waiters.get(msg.rid)(msg);
       } else if (msg.t === 'pair-code' && /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(msg.code || '')) {
         pairCode = { code: msg.code, expires: Number(msg.expires) || Date.now() + 10 * 60_000 };
         pairCodeWaiter?.resolve(pairCode);
@@ -161,7 +169,8 @@ export function startRelayClient({
         if (hello.kid === undefined) return secret;
         if (hello.kid === 'pair') return pairCode && pairCode.expires > Date.now() ? pairChannelSecret(pairCode.code, pcId) : null;
         const drop = DROP_KID.exec(String(hello.kid));
-        if (drop) return dropLookup(drop[1])?.secret ?? null;
+        // 링크: 주소에 비밀 열쇠가 없으므로 그 자리에서 ECDH로 열쇠를 만든다. 비밀번호는 쏙 서버가 확인한다.
+        if (drop) return dropLookup(drop[1]) ? 'ecdh' : null;
         return PEER_ID.test(String(hello.kid)) ? (peerLookup(hello.kid)?.secret ?? null) : null;
       },
       onFrame: (type, id, payload) => {
@@ -246,9 +255,13 @@ export function startRelayClient({
         const drop = DROP_KID.exec(String(kid));
         if (drop) {
           // 받기 링크: 보내기만. 쿠키·키 없이 링크 번호만 붙여 쏙이 다시 확인하게 한다
-          if (!DROP_ROUTES.has(`${head.method} ${path.split('?')[0]}`)) return refuse(id, 403);
+          const route = path.split('?')[0];
+          if (!DROP_ROUTES.has(`${head.method} ${route}`) && !(head.method === 'GET' && DROP_FILE.test(route))) return refuse(id, 403);
           if (!dropLookup(drop[1])) return refuse(id, 410);
           headers['x-ssok-drop'] = drop[1];
+          // 암호화된 첫 메시지로 받은 비밀번호 (쏙 서버가 확인하고, 틀리면 횟수를 센다)
+          const pin = secure.peerInfo?.pin;
+          if (typeof pin === 'string' && pin.length <= 40) headers['x-ssok-pin'] = encodeURIComponent(pin);
         } else if (kid) {
           // 연결된 다른 PC: 휴대폰 쿠키 없이, 그 PC의 키로 PC끼리 기능만 쓴다 (통로의 열쇠가 곧 그 PC라는 증명)
           if (!PEER_ROUTES.has(`${head.method} ${path.split('?')[0]}`)) return refuse(id, 403);
@@ -312,6 +325,30 @@ export function startRelayClient({
   return {
     status: () => status,
     /** 다른 곳의 PC가 처음 연결할 때 넣을 코드를 중계 서버에서 받는다 (10분 동안 유효) */
+/** 링크 이름을 중계 서버에 등록한다 (다른 사람이 쓰고 있으면 거절된다) */
+    claimLink(name, linkId) {
+      if (!control || control.readyState !== 1 || status.state !== 'connected') {
+        return Promise.reject(Object.assign(new Error('중계 서버에 연결되어 있지 않아요. [설정]의 ‘어디서나 (중계 서버)’를 확인해 주세요.'), { status: 409 }));
+      }
+      const rid = nextRid++;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          waiters.delete(rid);
+          reject(Object.assign(new Error('중계 서버가 응답하지 않아요. 잠시 뒤 다시 시도해 주세요.'), { status: 504 }));
+        }, 10_000);
+        waiters.set(rid, (reply) => {
+          clearTimeout(timer);
+          waiters.delete(rid);
+          if (reply.ok) resolve();
+          else reject(Object.assign(new Error(reply.error || '링크 이름을 쓸 수 없어요.'), { status: 409 }));
+        });
+        control.send(JSON.stringify({ t: 'link-claim', rid, name, linkId }));
+      });
+    },
+    /** 끈 링크의 이름을 놓아준다 (중계 서버에 연결되어 있지 않으면 다음 연결 때 정리된다) */
+    releaseLink(name) {
+      if (control?.readyState === 1) control.send(JSON.stringify({ t: 'link-release', name }));
+    },
     requestPairCode() {
       if (!control || control.readyState !== 1 || status.state !== 'connected') {
         return Promise.reject(Object.assign(new Error('중계 서버에 연결되어 있지 않아요. [설정]의 ‘어디서나 (중계 서버)’를 확인해 주세요.'), { status: 409 }));

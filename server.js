@@ -464,11 +464,9 @@ async function main() {
       relayKey,
       // 연결된 다른 PC가 집 밖에서 중계로 보낼 때: 그 PC와 나눠 가진 키로 통로를 열고, 그 키로 들어온 것으로 본다
       tunnelPorts,
-      // 받기 링크로 들어온 사람: 링크의 비밀 열쇠로 통로를 연다 (끈 링크는 바로 막힌다)
-      dropLookup: (id) => {
-        const link = drops.active(id);
-        return link ? { secret: Buffer.from(link.secret, 'hex') } : null;
-      },
+      // 링크로 들어온 사람: 살아 있는 링크면 통로를 연다 (끈 링크는 바로 막힌다. 비밀번호는 쏙 서버가 확인한다)
+      dropLookup: (id) => drops.active(id),
+      links: () => drops.list().map((l) => ({ name: l.name, linkId: l.id })),
       peerLookup: (id) => {
         const peer = peerBook.getPaired(id);
         return peer?.kind === 'pc' ? { secret: peerRelaySecret(peer.recvKey), key: peer.recvKey } : null;
@@ -523,6 +521,10 @@ async function main() {
     relayPairCode: () => (relayClient ? relayClient.requestPairCode() : Promise.reject(Object.assign(new Error('먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요.'), { status: 409 }))),
     tunnelPorts,
     drops,
+    relayLinks: {
+      claim: (name, linkId) => (relayClient ? relayClient.claimLink(name, linkId) : Promise.reject(Object.assign(new Error('먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요.'), { status: 409 }))),
+      release: (name) => relayClient?.releaseLink(name),
+    },
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self,

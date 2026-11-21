@@ -57,18 +57,31 @@
         </section>
 
         <section id="drops-card" class="card drops-card" hidden>
-          <h2>받기 링크</h2>
-          <p class="muted small">{{APP_NAME}}이 없는 사람도 이 링크를 열면 이 PC로 파일·텍스트를 보낼 수 있어요. 받은 목록은 볼 수 없어요.</p>
+          <h2>링크로 주고받기</h2>
+          <p class="muted small">{{APP_NAME}}이 없는 사람도 링크와 비밀번호로 웹에서 이 PC와 주고받을 수 있어요. 그 사람은 내가 보내 준 것만 볼 수 있어요.</p>
           <p id="drops-off" class="muted small" hidden>[설정]에서 ‘어디서나 (중계 서버)’를 켜면 만들 수 있어요.</p>
           <ul id="drops" class="drops"></ul>
-          <form id="drop-form" class="drop-form">
-            <input id="drop-label" type="text" placeholder="누구에게? 예: 민수" maxlength="40" autocomplete="off" aria-label="링크 이름">
-            <select id="drop-days" aria-label="쓸 수 있는 기간">
-              <option value="1">1일</option>
-              <option value="7" selected>7일</option>
-              <option value="30">30일</option>
-            </select>
-            <button class="btn small primary" type="submit">링크 만들기</button>
+          <button id="drop-new" class="btn small" type="button">+ 새 링크</button>
+          <form id="drop-form" class="drop-form" hidden>
+            <label class="drop-field">누구에게<input id="drop-label" type="text" placeholder="예: 민수" maxlength="40" autocomplete="off"></label>
+            <label class="drop-field">링크 주소
+              <span class="drop-url"><span id="drop-host" class="muted"></span><input id="drop-name" type="text" placeholder="예: minsu (비우면 자동)" maxlength="30" autocomplete="off" spellcheck="false" autocapitalize="off"></span>
+            </label>
+            <div class="drop-row2">
+              <label class="drop-field">비밀번호<input id="drop-pin" type="text" maxlength="20" autocomplete="off" spellcheck="false"></label>
+              <label class="drop-field">기간
+                <select id="drop-days">
+                  <option value="1">1일</option>
+                  <option value="7" selected>7일</option>
+                  <option value="30">30일</option>
+                  <option value="0">끌 때까지</option>
+                </select>
+              </label>
+            </div>
+            <div class="drop-actions">
+              <button id="drop-cancel" class="btn small ghost" type="button">취소</button>
+              <button class="btn small primary" type="submit">링크 만들기</button>
+            </div>
           </form>
         </section>
 
@@ -320,6 +333,7 @@
       <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18h2"/></symbol>
       <symbol id="i-pc" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></symbol>
       <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 20V5m0 0L3 9m4-4 4 4M17 4v15m0 0 4-4m-4 4-4-4"/></symbol>
     </defs>
   </svg>

@@ -12,13 +12,15 @@ import crypto from 'node:crypto';
 import { acceptWebSocket } from './ws.js';
 import { sendJson, sendText } from './http.js';
 import { APP_NAME, APP_ID } from './brand.js';
+import { cleanLinkName, DROP_ID } from './drops.js';
 
 const PC_ID = /^[0-9a-f]{16}$/;
 const SID = /^[0-9a-f]{32}$/;
 const MAX_PCS_PER_INVITE = 10;
 const MAX_SESSIONS_PER_PC = 16;
 const ACCEPT_TIMEOUT_MS = 10_000;
-const PAIR_CODE_MS = 10 * 60_000; // 다른 곳의 PC와 처음 연결할 때 쓰는 연결 코드의 유효 시간
+const PAIR_CODE_MS = 10 * 60_000;
+const MAX_LINKS_PER_PC = 20; // 링크 이름 (ssok.example.com/minsu) // 다른 곳의 PC와 처음 연결할 때 쓰는 연결 코드의 유효 시간
 const MAX_BAD_TRIES = 20; // 초대 코드를 이만큼 틀리면 그 주소는 잠시 막는다
 const BAD_TRY_WINDOW_MS = 10 * 60_000;
 const STATIC_TYPES = {
@@ -51,10 +53,10 @@ export function newInviteCode() {
  */
 export function createRelayServer({ dataDir, publicDir, version, log = () => {} }) {
   const stateFile = path.join(dataDir, 'relay.json');
-  let state = { invites: [], pcs: {} };
+  let state = { invites: [], pcs: {}, links: {} }; // links: 링크 이름 → { pcId, linkId }
   try {
     const loaded = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-    if (Array.isArray(loaded.invites) && loaded.pcs && typeof loaded.pcs === 'object') state = loaded;
+    if (Array.isArray(loaded.invites) && loaded.pcs && typeof loaded.pcs === 'object') state = { links: {}, ...loaded };
   } catch {
     // 처음 실행
   }
@@ -143,8 +145,21 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     }
     if ((m = /^\/p\/([0-9a-f]{16})\/?$/.exec(url.pathname))) return servePage(req, res, 'index.html', m[1]);
     if ((m = /^\/p\/([0-9a-f]{16})\/manifest\.webmanifest$/.exec(url.pathname))) return serveManifest(res, m[1]);
-    if ((m = /^\/d\/([0-9a-f]{16})\/?$/.exec(url.pathname))) return servePage(req, res, 'drop.html', m[1]);
+    // 링크 이름으로 받는 PC와 링크 번호를 찾는다 (함부로 이름을 맞혀 보지 못하게 틀린 횟수를 센다)
+    if ((m = /^\/api\/link\/([^/]+)$/.exec(url.pathname))) {
+      const address = clientAddress(req);
+      if (tooManyTries(address)) return sendJson(res, 429, { error: '너무 많이 시도했어요. 10분 뒤에 다시 해 주세요.' });
+      const owner = state.links[cleanLinkName(decodeURIComponent(m[1])) ?? ''];
+      if (!owner) {
+        countBadTry(address);
+        return sendJson(res, 404, { error: '이 링크를 찾을 수 없어요. 주소를 확인해 주세요.' });
+      }
+      return sendJson(res, 200, { pcId: owner.pcId, linkId: owner.linkId, online: online.has(owner.pcId) });
+    }
     const name = url.pathname.slice(1);
+    // 링크 (ssok.example.com/minsu): 보내고 받는 화면. 정말 있는 링크인지는 화면이 /api/link로 확인한다.
+    const linkName = name.replace(/\/$/, '');
+    if (/^[A-Za-z0-9-]+$/.test(linkName) && cleanLinkName(linkName)) return servePage(req, res, 'drop.html');
     // 휴대폰 화면에 필요한 파일만 내준다 (HTML은 /p/<PC 번호>로만, 관리 화면 파일은 내주지 않는다)
     const ext = path.extname(name);
     if (/^[A-Za-z0-9._-]+$/.test(name) && STATIC_TYPES[ext] && ext !== '.html' && !name.startsWith('relay-admin')) return servePage(req, res, name);
@@ -267,10 +282,18 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
       ws.on('message', (data, binary) => {
         heard = Date.now();
         if (state.pcs[msg.id]) state.pcs[msg.id].lastSeen = heard;
-        if (binary || data.length > 200) return;
-        const text = data.toString('utf8');
-        if (text.includes('"ping"')) ws.sendJson({ t: 'pong' });
-        else if (text.includes('"pair-code"')) {
+        if (binary || data.length > 8192) return;
+        let m2;
+        try {
+          m2 = JSON.parse(data.toString('utf8'));
+        } catch {
+          return;
+        }
+        if (m2?.t === 'ping') ws.sendJson({ t: 'pong' });
+        else if (m2?.t === 'link-claim') ws.sendJson({ t: 'link-claim', rid: m2.rid, ...claimLink(msg.id, m2.name, m2.linkId) });
+        else if (m2?.t === 'link-release') releaseLink(msg.id, m2.name);
+        else if (m2?.t === 'link-sync' && Array.isArray(m2.links)) syncLinks(msg.id, m2.links);
+        else if (m2?.t === 'pair-code') {
           // 이 PC가 다른 곳의 PC와 연결하려고 연결 코드를 만든다 (예전 코드는 지운다)
           for (const [code, entry] of pairCodes) if (entry.pcId === msg.id || entry.expires < Date.now()) pairCodes.delete(code);
           let code;
@@ -287,6 +310,40 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
         save();
       });
     });
+  }
+
+// ---- 링크 이름: 중계 서버 안에서 겹치지 않게 PC들이 나눠 쓴다 ----
+
+  function claimLink(pcId, rawName, linkId) {
+    const name = cleanLinkName(rawName);
+    if (!name || !DROP_ID.test(String(linkId))) return { ok: false, error: '링크 이름을 확인해 주세요.' };
+    const owner = state.links[name];
+    if (owner && owner.pcId !== pcId) return { ok: false, error: `‘${name}’은(는) 다른 사람이 이미 쓰고 있어요. 다른 이름을 정해 주세요.` };
+    if (!owner && Object.values(state.links).filter((l) => l.pcId === pcId).length >= MAX_LINKS_PER_PC) {
+      return { ok: false, error: `링크는 PC 하나에 ${MAX_LINKS_PER_PC}개까지예요.` };
+    }
+    state.links[name] = { pcId, linkId };
+    save();
+    return { ok: true, name };
+  }
+
+  function releaseLink(pcId, rawName) {
+    const name = cleanLinkName(rawName);
+    if (name && state.links[name]?.pcId === pcId) {
+      delete state.links[name];
+      save();
+    }
+  }
+
+  /** PC가 연결할 때 자기 링크 목록을 다시 알려 준다 (중계 서버 자료가 사라졌을 때도 되살아나게) */
+  function syncLinks(pcId, links) {
+    const keep = new Set();
+    for (const { name, linkId } of links.slice(0, MAX_LINKS_PER_PC)) {
+      const result = claimLink(pcId, name, linkId);
+      if (result.ok) keep.add(result.name);
+    }
+    for (const [name, owner] of Object.entries(state.links)) if (owner.pcId === pcId && !keep.has(name)) delete state.links[name];
+    save();
   }
 
   /** 휴대폰이 들어왔다: PC에 알리고, PC가 따로 연결해 올 때까지 휴대폰 메시지를 모아 둔다 */
@@ -383,6 +440,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     removePc(pcId) {
       online.get(pcId)?.ws.close(4003, 'removed');
       delete state.pcs[pcId];
+      for (const [linkName, owner] of Object.entries(state.links)) if (owner.pcId === pcId) delete state.links[linkName];
       save();
     },
     /** 지금 이어져 주고받는 중인 휴대폰 수 (업데이트를 미룰지 정할 때 쓴다) */

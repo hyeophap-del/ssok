@@ -516,12 +516,21 @@ p { margin: 0; }
 .drop-row { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); font-size: 13px; }
 .drop-info { flex: 1; min-width: 0; }
 .drop-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drop-form { display: flex; gap: 6px; flex-wrap: wrap; }
+.drop-form { display: grid; gap: 8px; padding: 10px; border-radius: 12px; background: var(--surface-2); }
+.drop-field { display: grid; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); min-width: 0; }
+/* 주소 앞부분(중계 서버)은 한 줄로, 이름 칸은 그 아래에 넓게 */
+.drop-url { display: grid; gap: 4px; font-weight: 400; font-size: 13px; min-width: 0; }
+.drop-url > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.drop-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.drop-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drops-card > .btn { justify-self: start; }
 .drop-form input, .drop-form select {
   min-height: 32px; padding: 4px 10px; border-radius: 10px; border: 1px solid var(--border);
   background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px;
 }
-.drop-form input { flex: 1 1 120px; min-width: 0; }
+.drop-form input { min-width: 0; background: var(--surface); }
+.drop-form select { background: var(--surface); }
 .connect-form { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
 .connect-form label { font-size: 13px; font-weight: 600; }
 .connect-row { display: flex; gap: 8px; }
