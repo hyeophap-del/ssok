@@ -16,6 +16,8 @@ const PEER_ID = /^[0-9a-f]{16}$/;
 const DROP_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'GET /api/drop-info', 'GET /api/drop-items']);
 const DROP_FILE = /^\/api\/drop-files\/[0-9a-f]{16}$/;
 const DROP_KID = /^d:([0-9a-f]{16})$/;
+// 아이폰 단축어 (중계 서버가 단축어 대신 연다): 보내기만
+const SHORTCUT_ROUTES = new Set(['POST /api/upload', 'POST /api/text']);
 
 const pick = (headers, names) => Object.fromEntries(names.filter((n) => headers[n] !== undefined).map((n) => [n, String(headers[n])]));
 const decode = (bytes) => new TextDecoder().decode(bytes);
@@ -35,6 +37,7 @@ const decode = (bytes) => new TextDecoder().decode(bytes);
  *        연결된 다른 PC가 중계로 들어올 때: 그 PC와 나눠 가진 열쇠와, 그 PC가 이 PC에 내미는 키
  * @param {(linkId: string) => (object | null)} [options.dropLookup]  링크가 살아 있는지 (꺼졌거나 기간이 지났으면 null)
  * @param {() => {name: string, linkId: string}[]} [options.links]  이 PC의 링크 이름들 (중계 서버에 연결할 때마다 다시 알려 준다)
+ * @param {() => (Uint8Array | null)} [options.shortcutSecret]  아이폰 단축어 열쇠에서 만든 비밀 값 (없으면 단축어로 받지 않는다)
  * @param {Set<number>} [options.tunnelPorts]  그대로 통과시키는 연결이 이 PC의 쏙에 붙은 포트 (쏙이 'PC 화면'이 아닌 바깥 요청으로 대한다)
  */
 export function startRelayClient({
@@ -52,6 +55,7 @@ export function startRelayClient({
   peerLookup = () => null,
   dropLookup = () => null,
   links = () => [],
+  shortcutSecret = () => null,
   tunnelPorts = new Set(),
   log = () => {},
   WebSocketImpl = globalThis.WebSocket,
@@ -171,6 +175,7 @@ export function startRelayClient({
         const drop = DROP_KID.exec(String(hello.kid));
         // 링크: 주소에 비밀 열쇠가 없으므로 그 자리에서 ECDH로 열쇠를 만든다. 비밀번호는 쏙 서버가 확인한다.
         if (drop) return dropLookup(drop[1]) ? 'ecdh' : null;
+        if (hello.kid === 'shortcut') return shortcutSecret();
         return PEER_ID.test(String(hello.kid)) ? (peerLookup(hello.kid)?.secret ?? null) : null;
       },
       onFrame: (type, id, payload) => {
@@ -253,7 +258,11 @@ export function startRelayClient({
         headers['x-ssok-relay'] = relayKey;
         const kid = secure.hello?.kid;
         const drop = DROP_KID.exec(String(kid));
-        if (drop) {
+        if (kid === 'shortcut') {
+          // 아이폰 단축어: 보내기만. 쏙 서버도 이 표시를 보고 한 번 더 막는다
+          if (!SHORTCUT_ROUTES.has(`${head.method} ${path.split('?')[0]}`)) return refuse(id, 403);
+          headers['x-ssok-shortcut'] = '1';
+        } else if (drop) {
           // 받기 링크: 보내기만. 쿠키·키 없이 링크 번호만 붙여 쏙이 다시 확인하게 한다
           const route = path.split('?')[0];
           if (!DROP_ROUTES.has(`${head.method} ${route}`) && !(head.method === 'GET' && DROP_FILE.test(route))) return refuse(id, 403);

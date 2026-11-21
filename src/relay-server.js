@@ -13,6 +13,8 @@ import { acceptWebSocket } from './ws.js';
 import { sendJson, sendText } from './http.js';
 import { APP_NAME, APP_ID } from './brand.js';
 import { cleanLinkName, DROP_ID } from './drops.js';
+import { peerRelaySecret } from './peers.js';
+import { RelayClient } from '../public/relay.js';
 
 const PC_ID = /^[0-9a-f]{16}$/;
 const SID = /^[0-9a-f]{32}$/;
@@ -20,7 +22,8 @@ const MAX_PCS_PER_INVITE = 10;
 const MAX_SESSIONS_PER_PC = 16;
 const ACCEPT_TIMEOUT_MS = 10_000;
 const PAIR_CODE_MS = 10 * 60_000;
-const MAX_LINKS_PER_PC = 20; // 링크 이름 (ssok.example.com/minsu) // 다른 곳의 PC와 처음 연결할 때 쓰는 연결 코드의 유효 시간
+const MAX_LINKS_PER_PC = 20; // 링크 이름 (ssok.example.com/minsu)
+const SHORTCUT_BUFFER = 100 * 1024 * 1024; // 크기를 미리 알리지 않고 보낸 단축어 본문은 이만큼까지 모아서 넘긴다 (Cloudflare 무료 요금제의 한도와 같다) // 다른 곳의 PC와 처음 연결할 때 쓰는 연결 코드의 유효 시간
 const MAX_BAD_TRIES = 20; // 초대 코드를 이만큼 틀리면 그 주소는 잠시 막는다
 const BAD_TRY_WINDOW_MS = 10 * 60_000;
 const STATIC_TYPES = {
@@ -37,6 +40,78 @@ const INVITE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 헷갈리는 0/O, 
 
 const hash = (text) => crypto.createHash('sha256').update(String(text)).digest('hex');
 const sameHash = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/** 본문을 바이트 그대로 모은다 (사진 같은 파일이라 글자로 바꾸면 안 된다). 너무 크면 예외. */
+function readBytes(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > limit) {
+        req.removeAllListeners('data');
+        req.resume();
+        reject(Object.assign(new Error('too large'), { code: 'TOO_LARGE' }));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+/**
+ * 본문을 받는 대로 읽어 모아 두면서, 꺼내 쓰는 쪽에는 조각씩 넘겨준다 (for await로 읽는 스트림).
+ * 넘기는 쪽(PC로 가는 통로)이 늦어도 받기는 멈추지 않는다. limit을 넘으면 끊는다.
+ */
+function spool(req, limit) {
+  const chunks = [];
+  let total = 0;
+  let ended = false;
+  let error = null;
+  let wake = null;
+  const poke = () => {
+    const w = wake;
+    wake = null;
+    w?.();
+  };
+  req.on('data', (chunk) => {
+    total += chunk.length;
+    if (total > limit) {
+      error = Object.assign(new Error('too large'), { code: 'TOO_LARGE' });
+      req.destroy();
+    } else {
+      chunks.push(chunk);
+    }
+    poke();
+  });
+  req.on('end', () => {
+    ended = true;
+    poke();
+  });
+  req.on('error', (err) => {
+    error ??= err;
+    poke();
+  });
+  req.on('close', () => {
+    if (!ended) error ??= new Error('보내던 쪽이 끊었어요');
+    poke();
+  });
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        if (chunks.length) {
+          yield chunks.shift();
+          continue;
+        }
+        if (error) throw error;
+        if (ended) return;
+        await new Promise((resolve) => (wake = resolve));
+      }
+    },
+  };
+}
 
 export function newInviteCode() {
   const bytes = crypto.randomBytes(8);
@@ -120,6 +195,8 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     res.setHeader('Referrer-Policy', 'no-referrer');
     const url = new URL(req.url, 'http://relay');
     let m;
+    // 아이폰 단축어: 파일·텍스트를 그대로 올리면 이 중계 서버가 암호화된 통로로 PC에 넘긴다
+    if ((m = /^\/s\/([0-9a-f]{16})$/.exec(url.pathname)) && (req.method === 'POST' || req.method === 'PUT')) return shortcutUpload(req, res, m[1], url);
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendText(res, 405, 'Method Not Allowed');
     if (url.pathname === '/api/ping') return sendJson(res, 200, { app: `${APP_ID}-relay`, version });
     // 연결된 다른 PC가 '어디서나'로 보낼 수 있는지(그 PC가 지금 이 중계 서버에 붙어 있는지) 확인할 때
@@ -164,6 +241,82 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {} 
     const ext = path.extname(name);
     if (/^[A-Za-z0-9._-]+$/.test(name) && STATIC_TYPES[ext] && ext !== '.html' && !name.startsWith('relay-admin')) return servePage(req, res, name);
     return sendText(res, 404, 'Not Found');
+  }
+
+/**
+   * 아이폰 단축어가 보낸 것을 PC로 넘긴다. 단축어는 웹소켓·암호화를 못 하므로, 이 중계 서버가 휴대폰 대신
+   * 그 PC와 암호화된 통로를 열고(단축어 열쇠로) 받은 본문을 흘려보낸다. 그래서 이 경로만은 중계 서버가 내용을 볼 수 있다.
+   * 열쇠가 맞는지는 PC가 확인한다 (틀리면 통로가 열리지 않는다). PC는 이 통로로 보내기만 허락한다.
+   */
+  async function shortcutUpload(req, res, pcId, url) {
+    const address = clientAddress(req);
+    const fail = (status, error) => {
+      if (!req.complete) {
+        res.setHeader('Connection', 'close');
+        res.on('finish', () => req.destroy());
+      }
+      return sendJson(res, status, { error });
+    };
+    if (tooManyTries(address)) return fail(429, '너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요.');
+    const key = url.searchParams.get('k') ?? /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1] ?? '';
+    if (!/^[A-Za-z0-9_-]{20,100}$/.test(key)) {
+      countBadTry(address);
+      return fail(401, '단축어 주소가 맞지 않아요. PC의 쏙 화면에서 주소를 다시 복사해 주세요.');
+    }
+    if (!online.has(pcId)) return fail(503, 'PC의 쏙이 꺼져 있거나 중계 서버에 연결되어 있지 않아요.');
+
+    // 본문은 받는 대로 바로 읽어 둔다. 읽지 않고 두면 Cloudflare 터널의 한 연결(HTTP/2)이 그 본문으로 가득 차서,
+    // 같은 연결로 오는 PC의 응답까지 막혀 통로가 열리지 않는다 (실제로 겪었다).
+    // PC는 크기를 미리 알아야 하므로, 단축어가 크기 없이 보내면 끝까지 모아서 잰다.
+    let length = Number(req.headers['content-length']);
+    if (Number.isSafeInteger(length) && length > SHORTCUT_BUFFER) return fail(413, '한 번에 100MB까지 보낼 수 있어요.');
+    let body;
+    if (Number.isSafeInteger(length) && length >= 0) {
+      body = spool(req, SHORTCUT_BUFFER);
+    } else {
+      try {
+        body = await readBytes(req, SHORTCUT_BUFFER);
+      } catch {
+        return fail(413, '한 번에 100MB까지 보낼 수 있어요.');
+      }
+      length = body.length;
+    }
+
+    let client;
+    try {
+      client = await RelayClient.connect(`ws://127.0.0.1:${server.address().port}/ws/c/${pcId}`, peerRelaySecret(key), { kid: 'shortcut', device: '아이폰 단축어' });
+    } catch (err) {
+      if (err.code === 'BAD_KEY' || err.code === 'UNKNOWN_PEER') {
+        countBadTry(address);
+        return fail(401, '단축어 주소가 맞지 않아요. PC의 쏙 화면에서 주소를 다시 복사해 주세요.');
+      }
+      return fail(503, 'PC의 쏙이 꺼져 있거나 중계 서버에 연결되어 있지 않아요.');
+    }
+    const params = new URLSearchParams();
+    for (const name of ['name', 'lastModified']) if (url.searchParams.has(name)) params.set(name, url.searchParams.get(name));
+    try {
+      const answer = await client.request('POST', `/api/upload${params.size ? `?${params}` : ''}`, {
+        headers: {
+          'content-type': String(req.headers['content-type'] || 'application/octet-stream'),
+          'content-length': String(length),
+          'user-agent': String(req.headers['user-agent'] || ''),
+          'x-requested-with': APP_ID,
+        },
+        body,
+      });
+      let json = null;
+      try {
+        json = await answer.json();
+      } catch {
+        json = null;
+      }
+      if (answer.status >= 200 && answer.status < 300) return sendJson(res, 200, { ok: true, name: json?.name ?? null });
+      return fail(answer.status, json?.error || 'PC가 받지 못했어요.');
+    } catch {
+      return fail(502, '보내는 중에 연결이 끊겼어요. 다시 보내 주세요.');
+    } finally {
+      client.close();
+    }
   }
 
   async function servePage(req, res, name, pcId) {

@@ -384,6 +384,8 @@ async function main() {
   if (!config.token || args['reset-token']) config.token = newToken();
   // 접속 코드를 새로 만들면 어디서나(중계) 비밀 열쇠도 바꿔서 예전 휴대폰이 더는 못 들어오게 한다
   if (args['reset-token'] && config.relay?.secret) config.relay = { ...config.relay, secret: crypto.randomBytes(32).toString('hex') };
+  // 아이폰 단축어가 중계 서버로 보낼 때 쓰는 열쇠 (보내기만 된다). 접속 코드를 새로 만들면 이것도 바꾼다.
+  if (!config.shortcutKey || args['reset-token']) config.shortcutKey = crypto.randomBytes(24).toString('base64url');
   if (args.dir) config.dir = path.resolve(args.dir);
   if (!config.id) config.id = newPeerId();
   if (args.name !== undefined) config.name = cleanName(args.name) || undefined;
@@ -467,6 +469,8 @@ async function main() {
       // 링크로 들어온 사람: 살아 있는 링크면 통로를 연다 (끈 링크는 바로 막힌다. 비밀번호는 쏙 서버가 확인한다)
       dropLookup: (id) => drops.active(id),
       links: () => drops.list().map((l) => ({ name: l.name, linkId: l.id })),
+      // 아이폰 단축어: 중계 서버가 단축어 열쇠로 대신 통로를 연다 (보내기만)
+      shortcutSecret: () => peerRelaySecret(config.shortcutKey),
       peerLookup: (id) => {
         const peer = peerBook.getPaired(id);
         // 연결된 PC와 휴대폰 앱 모두: 그 기기와 나눠 가진 키로 통로를 연다
@@ -519,6 +523,7 @@ async function main() {
     relayKey,
     relayInfo: () => relayInfo(),
     relayUrl: () => (localOnly ? null : (config.relay?.url ?? null)),
+    shortcutRelayUrl: () => (localOnly || !config.relay?.url ? null : `${config.relay.url}/s/${config.id}?k=${config.shortcutKey}`),
     relayPairCode: () => (relayClient ? relayClient.requestPairCode() : Promise.reject(Object.assign(new Error('먼저 [설정]에서 ‘어디서나 (중계 서버)’를 켜 주세요.'), { status: 409 }))),
     tunnelPorts,
     drops,

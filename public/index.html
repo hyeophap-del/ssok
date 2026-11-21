@@ -220,13 +220,18 @@
             <li>아래쪽 <b>ⓘ</b>를 눌러 <b>공유 시트에서 보기</b>를 켜고, 단축어 이름을 ‘{{APP_NAME}}으로 보내기’로 바꿔요.</li>
             <li>이제 사진 앱에서 <b>공유 → {{APP_NAME}}으로 보내기</b>를 누르면 PC의 받은 파일 폴더로 가요. 텍스트·링크도 돼요.</li>
           </ol>
-          <p class="muted small ios-intro">이 주소에는 PC 접속 코드가 들어 있으니 다른 사람에게 보여 주지 마세요. PC의 IP 주소가 바뀌면 주소를 다시 붙여 넣어야 해요.</p>
+          <p id="ios-note" class="muted small ios-intro">이 주소에는 PC 접속 코드가 들어 있으니 다른 사람에게 보여 주지 마세요. PC의 IP 주소가 바뀌면 주소를 다시 붙여 넣어야 해요.</p>
+          <div id="ios-alt" class="ios-intro" hidden>
+            <p class="muted small">집 Wi-Fi에서 큰 동영상(100MB 넘게)을 보낼 때는 아래 주소로 단축어를 하나 더 만들어 두세요. 더 빠르고 크기 제한이 없어요.</p>
+            <code id="ios-alt-url" class="addr-url ios-url"></code>
+            <button id="ios-alt-copy" class="btn small" type="button">주소 복사</button>
+          </div>
         </details>
 
         <section id="install-tip" class="card tip remote-only" hidden>
           <div>
             <strong>홈 화면에 추가해 두세요</strong>
-            <p class="muted small">브라우저 메뉴(⋮)에서 <b>‘홈 화면에 추가’</b>를 누르면 다음부터 앱처럼 바로 열려요.</p>
+            <p id="install-tip-text" class="muted small">브라우저 메뉴(⋮)에서 <b>‘홈 화면에 추가’</b>를 누르면 다음부터 앱처럼 바로 열려요.</p>
           </div>
           <button id="install-tip-close" class="icon-btn" type="button" aria-label="닫기">
             <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>

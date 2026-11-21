@@ -167,6 +167,7 @@ export function createApp(options) {
     tunnelPorts = new Set(), // 중계 통로가 이 PC의 쏙에 붙은 포트 (이 PC 안에서 온 연결이지만 바깥 요청이다)
     drops = null, // 링크 목록 (src/drops.js). 쏙이 없는 사람이 링크로 이 PC와 주고받을 때
     relayLinks = null, // { claim(name, linkId): Promise, release(name) } 링크 이름을 중계 서버에 등록·해제
+    shortcutRelayUrl = () => null, // 아이폰 단축어가 집 밖에서도 보내는 주소 (중계 서버를 거친다)
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -265,6 +266,10 @@ export function createApp(options) {
         device: link ? `${link.label} · 링크` : '링크',
       };
     }
+    // 아이폰 단축어 (중계 서버가 단축어 열쇠로 대신 연 통로): 보내기만 된다
+    if (viaRelay && req.headers['x-ssok-shortcut'] !== undefined) {
+      return { isHost: false, viaRelay, authed: true, shortcut: true, giveCookie: false, device: deviceLabel(req.headers['user-agent']) };
+    }
     // 연결해 둔 다른 PC는 서로 주고받은 키로 들어온다. 같은 PC에서 왔더라도 'PC 화면' 권한은 주지 않는다.
     const peer = peers?.authenticate(req, { viaRelay });
     if (peer !== undefined) {
@@ -359,6 +364,12 @@ export function createApp(options) {
       rejectBody(req, res);
       return sendJson(res, 403, { error: '링크로는 보내기와 받기만 할 수 있어요.' });
     }
+    if (ctx.shortcut) {
+      if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
+      if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
+      rejectBody(req, res);
+      return sendJson(res, 403, { error: '단축어로는 보내기만 할 수 있어요.' });
+    }
     if (pathname === '/api/drops' || pathname.startsWith('/api/drops/')) return dropsApi(req, res, url, ctx);
 
     if (peers && (await peers.handle(req, res, url, ctx))) return;
@@ -421,7 +432,13 @@ export function createApp(options) {
     const info = { app: APP_ID, version: VERSION, isHost: ctx.isHost, device: ctx.device, androidApp: staticFiles.has(`${APP_ID}.apk`) };
     if (!ctx.isHost) {
       // 아이폰 단축어에 넣을 보내기 주소. 이 휴대폰은 이미 이 접속 코드로 들어와 있으므로 새로 알려 주는 것은 없다.
-      return ctx.peer ? info : { ...info, shortcutUrl: `http://${req.headers.host}/api/upload?k=${token}` };
+      if (ctx.peer) return info;
+      // 아이폰 단축어에 넣을 주소: 집 Wi-Fi 주소(중계로 들어온 휴대폰은 모른다)와, 중계 서버를 켰으면 어디서나 되는 주소
+      return {
+        ...info,
+        ...(ctx.viaRelay ? {} : { shortcutUrl: `http://${req.headers.host}/api/upload?k=${token}` }),
+        shortcutRelayUrl: shortcutRelayUrl(),
+      };
     }
     const port = server.address().port;
     const addresses = lanAddresses().map(({ address, iface }) => {

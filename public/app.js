@@ -385,13 +385,29 @@ function setupRemote() {
     }
   } else if (!store.get(TIP_KEY, false) && !standalone) {
     $('install-tip').hidden = false;
+    // 아이폰 사파리는 메뉴(⋮)가 아니라 아래쪽 공유 버튼에 있다
+    if (/iPhone|iPad/i.test(navigator.userAgent)) {
+      $('install-tip-text').replaceChildren('아래쪽 공유 버튼(□↑)에서 ', el('b', {}, '‘홈 화면에 추가’'), '를 누르면 다음부터 앱처럼 바로 열려요.');
+    }
   }
 
-  if (state.session.shortcutUrl && !RELAY && /iPhone|iPad/i.test(navigator.userAgent)) {
-    // 아이폰은 앱 대신 '단축어'로 공유 메뉴에 보내기를 만든다
+  const { shortcutUrl, shortcutRelayUrl } = state.session;
+  if ((shortcutUrl || shortcutRelayUrl) && /iPhone|iPad/i.test(navigator.userAgent)) {
+    // 아이폰은 앱 대신 '단축어'로 공유 메뉴에 보내기를 만든다.
+    // PC가 중계 서버를 쓰면 어디서나 되는 주소를 먼저 권하고, 집 Wi-Fi 주소는 큰 동영상용으로 함께 보여 준다.
+    const main = shortcutRelayUrl || shortcutUrl;
     $('ios-card').hidden = false;
-    $('ios-url').textContent = state.session.shortcutUrl;
-    $('ios-copy').addEventListener('click', () => copyAndReport(state.session.shortcutUrl));
+    $('ios-url').textContent = main;
+    $('ios-copy').addEventListener('click', () => copyAndReport(main));
+    if (shortcutRelayUrl) {
+      $('ios-note').textContent =
+        '이 주소는 집에서도 밖에서도 돼요 (중계 서버를 거쳐요). 한 번에 100MB까지 보낼 수 있어요. 보내기 전용 열쇠가 들어 있으니 다른 사람에게 보여 주지 마세요. 이 경로는 휴대폰과 중계 서버 사이만 암호화돼요 (중계 서버가 내용을 볼 수 있어요).';
+    }
+    if (shortcutRelayUrl && shortcutUrl) {
+      $('ios-alt').hidden = false;
+      $('ios-alt-url').textContent = shortcutUrl;
+      $('ios-alt-copy').addEventListener('click', () => copyAndReport(shortcutUrl));
+    }
   }
   $('install-tip-close').addEventListener('click', () => {
     $('install-tip').hidden = true;
