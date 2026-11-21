@@ -44,7 +44,8 @@
           <details id="anywhere-help" class="anywhere-help">
             <summary>집 밖에서도 쓰려면?</summary>
             <ol>
-              <li>이 PC와 휴대폰에 무료 앱 <b>Tailscale</b>을 설치해요 (<a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">tailscale.com/download</a>, 휴대폰은 앱 스토어에서 ‘Tailscale’).</li>
+              <li><b>중계 서버가 있다면</b>: 아래 [설정]의 ‘어디서나 (중계 서버)’에 주소와 초대 코드를 넣으면 끝이에요. 휴대폰엔 아무것도 깔지 않아도 돼요.</li>
+              <li><b>없다면</b>: 이 PC와 휴대폰에 무료 앱 <b>Tailscale</b>을 설치해요 (<a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">tailscale.com/download</a>, 휴대폰은 앱 스토어에서 ‘Tailscale’).</li>
               <li>두 기기 모두 <b>같은 계정</b>(구글 등)으로 로그인하고 연결을 켜요.</li>
               <li>잠시 뒤 이 카드에 <b>[어디서나]</b> 탭이 생기면, 그 QR을 휴대폰으로 스캔해요. 그 주소는 집에서도 밖에서도 열려요.</li>
             </ol>
@@ -83,6 +84,15 @@
             </label>
             <button id="update-check" class="btn small" type="button">지금 확인</button>
           </div>
+          <form id="relay-form" class="setting" hidden>
+            <label for="relay-url">어디서나 (중계 서버) <span class="muted small">집 밖에서도 QR만으로 보내기</span></label>
+            <input id="relay-url" type="text" placeholder="중계 서버 주소 (예: ssok.example.com)" autocomplete="off" spellcheck="false">
+            <div class="connect-row">
+              <input id="relay-invite" type="text" placeholder="초대 코드 (예: ABCD-EFGH)" autocomplete="off" spellcheck="false" maxlength="9">
+              <button class="btn" type="submit">저장</button>
+            </div>
+            <p id="relay-status" class="muted small"></p>
+          </form>
           <div id="log-row" class="update-row" hidden>
             <span class="small">문제가 생기면 이 기록을 보내 주세요<br><span class="muted small">접속 코드는 가려서 열어요</span></span>
             <button id="open-log" class="btn small" type="button">문제 기록 열기</button>
@@ -209,9 +219,9 @@
   <div id="locked" class="locked" hidden>
     <div class="locked-card">
       <img src="/icon.svg" alt="" width="64" height="64">
-      <h1>PC 화면의 QR 코드를 스캔하세요</h1>
-      <p>PC에서 {{APP_NAME}} 프로그램을 실행하면 화면에 QR 코드가 나타나요.<br>휴대폰 카메라로 스캔하면 바로 연결돼요.</p>
-      <p class="muted small">이미 스캔했는데 이 화면이 보인다면 접속 코드가 바뀌었을 수 있어요. 다시 스캔해 주세요.</p>
+      <h1 id="locked-title">PC 화면의 QR 코드를 스캔하세요</h1>
+      <p id="locked-text">PC에서 {{APP_NAME}} 프로그램을 실행하면 화면에 QR 코드가 나타나요.<br>휴대폰 카메라로 스캔하면 바로 연결돼요.</p>
+      <p id="locked-note" class="muted small">이미 스캔했는데 이 화면이 보인다면 접속 코드가 바뀌었을 수 있어요. 다시 스캔해 주세요.</p>
     </div>
   </div>
 

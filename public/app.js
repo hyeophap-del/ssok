@@ -1,4 +1,6 @@
 // {{APP_NAME}} 웹 화면. PC(호스트)와 휴대폰이 같은 페이지를 쓰고, 세션 정보에 따라 화면이 바뀐다.
+// 중계 서버(어디서나)로 열리면 PC와 직접 대신 암호화된 통로(relay.js)로 주고받는다.
+import { RelayClient, fromHex } from './relay.js';
 
 const $ = (id) => document.getElementById(id);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -31,6 +33,22 @@ const store = {
   },
 };
 
+// 중계 서버 주소(https://<중계>/p/<PC 번호>#<비밀 열쇠>)로 열렸으면 그 정보. 아니면 null (집 Wi-Fi로 PC에 바로 연결).
+// 비밀 열쇠는 처음 열 때 # 뒤에서 읽어 이 휴대폰에 저장하고, 주소창에서는 지운다 (홈 화면 바로가기에는 남지 않게).
+const RELAY = (() => {
+  const m = /^\/p\/([0-9a-f]{16})\/?$/.exec(location.pathname);
+  if (!m) return null;
+  const key = `${APP_ID}.relay.${m[1]}`;
+  let secret = location.hash.slice(1);
+  if (/^[0-9a-f]{64}$/.test(secret)) {
+    store.set(key, secret);
+    history.replaceState(null, '', location.pathname);
+  } else {
+    secret = store.get(key, null);
+  }
+  return { pcId: m[1], secret };
+})();
+
 const state = {
   session: null,
   items: [],
@@ -49,25 +67,38 @@ const state = {
 
 async function init() {
   if (new URLSearchParams(location.search).has('k')) history.replaceState(null, '', '/');
+  if (RELAY && !RELAY.secret) return showLocked('relay');
 
   let session = null;
+  let lastError = null;
+  // 중계를 거치면 연결에 조금 걸릴 수 있어 빈 화면 대신 연결 중임을 보여 준다
+  const slow = RELAY ? setTimeout(() => showLocked('connecting'), 1200) : null;
   for (let attempt = 0; attempt < 5 && !session; attempt++) {
     if (attempt > 0) await sleep(1000);
     try {
-      const res = await fetch('/api/session', { cache: 'no-store' });
+      const res = await request('GET', '/api/session');
       if (res.status === 401) return showLocked();
       if (res.ok) session = await res.json();
-    } catch {
-      // 잠깐 끊겼을 수 있으니 다시 시도한다
+    } catch (err) {
+      lastError = err; // 잠깐 끊겼을 수 있으니 다시 시도한다
+      if (['BAD_KEY', 'PC_OFFLINE', 'PC_TIMEOUT', 'BUSY'].includes(err.code)) break; // 중계 서버가 알려 준 이유는 곧바로 다시 해 봐도 같다
     }
   }
-  if (!session) return showLocked();
+  clearTimeout(slow);
+  if (!session) {
+    if (!RELAY) return showLocked();
+    // 열쇠가 틀렸으면 QR을 다시 스캔해야 하고, 그 밖에는 PC가 꺼졌거나 잠깐 끊긴 것이라 저절로 다시 시도한다
+    if (lastError?.code === 'BAD_KEY') return showLocked('relay');
+    showLocked('pc-offline');
+    return waitForPc();
+  }
   state.session = session;
 
   document.title = pageTitle();
   const app = $('app');
   app.classList.add(session.isHost ? 'host' : 'remote');
   app.hidden = false;
+  $('locked').hidden = true;
 
   const input = $('text-input');
   input.placeholder = session.isHost ? '휴대폰으로 보낼 텍스트나 링크' : '텍스트나 링크';
@@ -91,10 +122,35 @@ async function init() {
   connectEvents();
 }
 
-function showLocked() {
+function showLocked(reason) {
   $('app').hidden = true;
   $('locked').hidden = false;
   events?.close();
+  $('locked-note').hidden = reason === 'pc-offline' || reason === 'connecting';
+  if (reason === 'connecting') {
+    $('locked-title').textContent = 'PC에 연결하는 중…';
+    $('locked-text').textContent = '집 밖에서는 연결에 몇 초 걸릴 수 있어요.';
+  } else if (reason === 'pc-offline') {
+    $('locked-title').textContent = 'PC에 연결하지 못했어요';
+    $('locked-text').textContent = `PC가 켜져 있고 ${APP_NAME}이(가) 실행 중인지 확인해 주세요. 연결되면 이 화면이 저절로 열려요.`;
+  } else if (reason === 'relay') {
+    $('locked-title').textContent = 'PC 화면의 [어디서나] QR을 다시 스캔하세요';
+    $('locked-text').textContent = '이 휴대폰에 저장된 연결 정보가 없거나 PC에서 바뀌었어요.';
+  }
+}
+
+/** 어디서나(중계) 모드에서 PC가 꺼져 있으면, 켜질 때까지 가끔 확인하다가 연결되면 화면을 다시 연다 */
+async function waitForPc() {
+  for (;;) {
+    await sleep(document.hidden ? 30_000 : 8000);
+    try {
+      const res = await request('GET', '/api/session');
+      if (res.ok) return location.reload();
+      if (res.status === 401) return showLocked('relay');
+    } catch (err) {
+      if (err.code === 'BAD_KEY') return showLocked('relay');
+    }
+  }
 }
 
 function setupHost() {
@@ -135,35 +191,62 @@ function setupHost() {
   else document.querySelector('.targets').hidden = true;
 }
 
-// 집 Wi-Fi QR과 '어디서나'(Tailscale) QR을 탭으로 바꿔 보여 준다
+// 집 Wi-Fi QR과 '어디서나' QR을 탭으로 바꿔 보여 준다.
+// 어디서나 주소는 중계 서버를 설정했으면 그 주소, 아니면 Tailscale 주소.
 const QR_TAB_KEY = `${APP_ID}.qrTab`;
+let qrTab = 'home';
+
+function anywhereInfo() {
+  const { relay, tailscale } = state.session;
+  if (relay?.url) {
+    const hint =
+      relay.state === 'connected'
+        ? '집 밖(LTE·5G 등)에서도 이 QR 주소로 열려요. 내용은 종단간 암호화돼요.'
+        : relay.state === 'error'
+          ? `중계 서버에 연결하지 못했어요: ${relay.error}`
+          : '중계 서버에 연결하는 중이에요…';
+    return { kind: 'relay', url: relay.url, qrSvg: relay.qrSvg, hint };
+  }
+  if (tailscale) return { kind: 'tailscale', url: tailscale.url, qrSvg: tailscale.qrSvg, hint: 'Tailscale을 켠 휴대폰은 집 밖에서도 이 QR 주소로 열려요.' };
+  return null;
+}
 
 function setupAnywhere() {
-  const { tailscale } = state.session;
-  if (!tailscale) return; // 없으면 '집 밖에서도 쓰려면?' 안내만 보인다
-  $('anywhere-help').hidden = true;
-  $('qr-tabs').hidden = false;
-  $('self-anywhere').hidden = false;
-  $('self-anywhere-address').textContent = state.session.port === 8765 ? tailscale.address : `${tailscale.address}:${state.session.port}`;
-  const select = (tab) => {
-    if (!$('qr')) return; // 집 네트워크를 못 찾은 경우
-    store.set(QR_TAB_KEY, tab);
-    const anywhere = tab === 'anywhere';
-    $('qr-tab-home').setAttribute('aria-selected', String(!anywhere));
-    $('qr-tab-anywhere').setAttribute('aria-selected', String(anywhere));
-    $('addr-picker').hidden = anywhere || state.session.addresses.length < 2;
-    if (anywhere) {
-      $('qr').innerHTML = tailscale.qrSvg; // 서버가 만든 SVG
-      $('addr-url').textContent = tailscale.url;
-      $('qr-hint').textContent = 'Tailscale을 켠 휴대폰은 집 밖에서도 이 QR 주소로 열려요.';
-    } else {
-      showAddress(Number($('addr-select').value || 0));
-      $('qr-hint').textContent = '휴대폰 카메라로 QR 코드를 스캔하면 바로 열려요.';
-    }
-  };
-  $('qr-tab-home').addEventListener('click', () => select('home'));
-  $('qr-tab-anywhere').addEventListener('click', () => select('anywhere'));
-  if (store.get(QR_TAB_KEY, 'home') === 'anywhere') queueMicrotask(() => select('anywhere'));
+  $('qr-tab-home').addEventListener('click', () => selectQrTab('home'));
+  $('qr-tab-anywhere').addEventListener('click', () => selectQrTab('anywhere'));
+  renderAnywhere();
+  if (store.get(QR_TAB_KEY, 'home') === 'anywhere') queueMicrotask(() => selectQrTab('anywhere'));
+}
+
+function renderAnywhere() {
+  const info = anywhereInfo();
+  const { tailscale, port } = state.session;
+  $('qr-tabs').hidden = !info;
+  $('anywhere-help').hidden = Boolean(info);
+  $('qr-tab-anywhere').textContent = info?.kind === 'tailscale' ? '어디서나 (Tailscale)' : '어디서나';
+  // PC끼리 밖에서 연결할 때 쓰는 주소 (Tailscale)
+  $('self-anywhere').hidden = !tailscale;
+  if (tailscale) $('self-anywhere-address').textContent = port === 8765 ? tailscale.address : `${tailscale.address}:${port}`;
+  if (qrTab === 'anywhere') selectQrTab(info ? 'anywhere' : 'home', false);
+}
+
+function selectQrTab(tab, remember = true) {
+  if (!$('qr')) return; // 집 네트워크를 못 찾은 경우
+  const info = anywhereInfo();
+  const anywhere = tab === 'anywhere' && Boolean(info);
+  qrTab = anywhere ? 'anywhere' : 'home';
+  if (remember) store.set(QR_TAB_KEY, qrTab);
+  $('qr-tab-home').setAttribute('aria-selected', String(!anywhere));
+  $('qr-tab-anywhere').setAttribute('aria-selected', String(anywhere));
+  $('addr-picker').hidden = anywhere || state.session.addresses.length < 2;
+  if (anywhere) {
+    $('qr').innerHTML = info.qrSvg; // 서버가 만든 SVG
+    $('addr-url').textContent = info.kind === 'relay' ? info.url.replace(/#.*/, '#…') : info.url; // 비밀 열쇠는 화면에 다 보이지 않게
+    $('qr-hint').textContent = info.hint;
+  } else {
+    showAddress(Number($('addr-select').value || 0));
+    $('qr-hint').textContent = '휴대폰 카메라로 QR 코드를 스캔하면 바로 열려요.';
+  }
 }
 
 function showAddress(index) {
@@ -181,7 +264,7 @@ function setupRemote() {
   }
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
   const android = /Android/i.test(navigator.userAgent);
-  if (state.session.androidApp && android) {
+  if (state.session.androidApp && android && !RELAY) {
     // 안드로이드에서는 홈 화면 바로가기보다 앱이 훨씬 편하다 (공유 메뉴, 화면 꺼져도 전송)
     if (!store.get(APP_CARD_KEY, false)) $('app-card').hidden = false;
     // 앱이 있으면 앱의 연결 화면이 열리고, 없으면 이 화면으로 돌아와 설치 안내를 띄운다
@@ -200,7 +283,7 @@ function setupRemote() {
     $('install-tip').hidden = false;
   }
 
-  if (state.session.shortcutUrl && /iPhone|iPad/i.test(navigator.userAgent)) {
+  if (state.session.shortcutUrl && !RELAY && /iPhone|iPad/i.test(navigator.userAgent)) {
     // 아이폰은 앱 대신 '단축어'로 공유 메뉴에 보내기를 만든다
     $('ios-card').hidden = false;
     $('ios-url').textContent = state.session.shortcutUrl;
@@ -217,12 +300,15 @@ function setupRemote() {
 let events = null;
 let reconnectTimer = null;
 
-function connectEvents() {
-  events?.close();
-  events = new EventSource('/api/events');
-
-  events.addEventListener('snapshot', (e) => {
-    const data = JSON.parse(e.data);
+/** 서버가 보내는 실시간 알림 처리 (집 Wi-Fi의 EventSource와 어디서나(중계) 모드가 같이 쓴다) */
+const EVENT_HANDLERS = {
+  relay: (info) => {
+    if (!state.session?.isHost) return;
+    state.session.relay = info;
+    renderAnywhere();
+    renderRelayStatus();
+  },
+  'snapshot': (data) => {
     state.items = data.items;
     state.remotes = data.presence.remotes;
     state.connected = true;
@@ -234,36 +320,43 @@ function connectEvents() {
       if (data.request) showRequest(data.request);
       else hideRequest();
     }
-  });
-  events.addEventListener('peers', (e) => {
-    state.peers = JSON.parse(e.data).peers;
+  },
+  peers: (data) => {
+    state.peers = data.peers;
     renderPeers();
-  });
-  events.addEventListener('pair-request', (e) => showRequest(JSON.parse(e.data)));
-  events.addEventListener('pair-request-done', (e) => {
-    const { rid, decision } = JSON.parse(e.data);
+  },
+  'pair-request': (data) => showRequest(data),
+  'pair-request-done': ({ rid, decision }) => {
     if (state.request?.rid !== rid) return;
     if (decision === 'timeout' || decision === 'gone') toast('연결 요청이 취소됐어요.');
     hideRequest();
-  });
-  events.addEventListener('pair-result', (e) => onPairResult(JSON.parse(e.data)));
-  events.addEventListener('update', (e) => renderUpdate(JSON.parse(e.data)));
-  events.addEventListener('add', (e) => {
-    const item = JSON.parse(e.data);
+  },
+  'pair-result': (data) => onPairResult(data),
+  'update': (data) => renderUpdate(data),
+  'add': (item) => {
     if (state.items.some((i) => i.id === item.id)) return;
     state.items.unshift(item);
     renderItems(item.id);
     announce(item);
-  });
-  events.addEventListener('remove', (e) => {
-    const { id } = JSON.parse(e.data);
+  },
+  'remove': ({ id }) => {
     state.items = state.items.filter((i) => i.id !== id);
     renderItems();
-  });
-  events.addEventListener('presence', (e) => {
-    state.remotes = JSON.parse(e.data).remotes;
+  },
+  presence: (data) => {
+    state.remotes = data.remotes;
     updateStatus();
-  });
+  },
+};
+
+function connectEvents() {
+  if (RELAY) return connectRelayEvents();
+  events?.close();
+  events = new EventSource('/api/events');
+  for (const [name, handle] of Object.entries(EVENT_HANDLERS)) {
+    events.addEventListener(name, (e) => handle(JSON.parse(e.data)));
+  }
+
   events.addEventListener('open', () => {
     state.connected = true;
     updateStatus();
@@ -279,11 +372,42 @@ function connectEvents() {
   });
 }
 
+/** 어디서나(중계) 모드의 실시간 알림: 암호화된 통로로 받은 text/event-stream을 직접 나눠 읽는다 */
+async function connectRelayEvents() {
+  let buffer = '';
+  const decoder = new TextDecoder();
+  try {
+    const res = await request('GET', '/api/events', {
+      onChunk: (chunk) => {
+        buffer += decoder.decode(chunk, { stream: true });
+        let at;
+        while ((at = buffer.indexOf('\n\n')) >= 0) {
+          const block = buffer.slice(0, at);
+          buffer = buffer.slice(at + 2);
+          const name = /^event: (.+)$/m.exec(block)?.[1];
+          const data = /^data: (.+)$/m.exec(block)?.[1];
+          if (name && data && EVENT_HANDLERS[name]) EVENT_HANDLERS[name](JSON.parse(data));
+        }
+      },
+    });
+    if (res.status === 401) return showLocked('relay');
+    state.connected = true;
+    updateStatus();
+    await res.done;
+  } catch {
+    // 끊겼다: 아래에서 다시 연결한다
+  }
+  state.connected = false;
+  updateStatus();
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(reconnect, 3000);
+}
+
 async function reconnect() {
   clearTimeout(reconnectTimer);
   try {
-    const res = await fetch('/api/session', { cache: 'no-store' });
-    if (res.status === 401) return showLocked();
+    const res = await request('GET', '/api/session');
+    if (res.status === 401) return showLocked(RELAY ? 'relay' : undefined);
   } catch {
     reconnectTimer = setTimeout(reconnect, 3000);
     return;
@@ -296,7 +420,7 @@ function updateStatus() {
   if (!state.connected) {
     return setStatus('offline', isHost ? `${APP_NAME} 프로그램이 꺼져 있어요` : 'PC와 연결이 끊겼어요 · 다시 연결 중');
   }
-  if (!isHost) return setStatus('online', 'PC와 연결됨');
+  if (!isHost) return setStatus('online', RELAY ? 'PC와 연결됨 · 어디서나' : 'PC와 연결됨');
   const n = state.remotes.length;
   if (n === 0) return setStatus('waiting', '휴대폰 연결 대기 중');
   return setStatus('online', n === 1 ? `${state.remotes[0]} 연결됨` : `기기 ${n}대 연결됨`);
@@ -394,9 +518,11 @@ function renderItem(item) {
 
   const thumb = el('div', { class: 'thumb' });
   thumb.append(icon(iconFor(item)));
-  if (item.kind === 'file' && PREVIEWABLE_IMAGES.has(item.mime)) {
-    const img = el('img', { src: fileUrl(item, true), alt: '', loading: 'lazy', decoding: 'async' });
+  if (item.kind === 'file' && PREVIEWABLE_IMAGES.has(item.mime) && (!RELAY || item.size <= 3 * 1024 * 1024)) {
+    const img = el('img', { src: RELAY ? undefined : fileUrl(item, true), alt: '', loading: 'lazy', decoding: 'async' });
     img.addEventListener('error', () => img.remove());
+    // 어디서나(중계) 모드에서는 암호화된 통로로 받아 화면에 붙인다
+    if (RELAY) relayBlobUrl(fileUrl(item, true)).then((url) => (img.src = url), () => img.remove());
     thumb.append(img);
   }
 
@@ -429,7 +555,7 @@ function renderItem(item) {
     const primary = item.from === 'host' && !received;
     const link = el('a', {
       class: primary ? 'btn primary' : 'btn',
-      href: fileUrl(item),
+      href: RELAY ? '#' : fileUrl(item),
       download: item.name,
       'data-action': 'download',
     });
@@ -475,6 +601,11 @@ async function onItemClick(e) {
 
   switch (target.dataset.action) {
     case 'download':
+      if (RELAY) {
+        e.preventDefault();
+        relayDownload(item);
+        break;
+      }
       // <a download>가 내려받기를 처리한다. 표시만 바꾼다.
       markDownloaded(item.id);
       break;
@@ -503,7 +634,41 @@ async function onItemClick(e) {
   }
 }
 
+/** 어디서나(중계) 모드에서 파일 받기: 암호화된 통로로 받아 휴대폰에 저장한다 */
+async function relayDownload(item) {
+  if (item.size > 500 * 1024 * 1024) toast('큰 파일이라 시간이 걸려요. 집 Wi-Fi에서 받으면 더 빨라요.');
+  else toast(`‘${item.name}’ 받는 중…`);
+  try {
+    const res = await request('GET', fileUrl(item));
+    if (!res.ok) throw new Error('PC에서 파일을 찾지 못했어요.');
+    const url = URL.createObjectURL(await res.blob());
+    const link = el('a', { href: url, download: item.name });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    markDownloaded(item.id);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+const blobUrls = new Map();
+async function relayBlobUrl(path) {
+  if (!blobUrls.has(path)) {
+    blobUrls.set(
+      path,
+      request('GET', path).then(async (res) => {
+        if (!res.ok) throw new Error('미리보기를 받지 못했어요');
+        return URL.createObjectURL(await res.blob());
+      }),
+    );
+  }
+  return blobUrls.get(path);
+}
+
 function download(item) {
+  if (RELAY) return relayDownload(item);
   const link = el('a', { href: fileUrl(item), download: item.name });
   document.body.append(link);
   link.click();
@@ -643,6 +808,7 @@ async function runQueue() {
 }
 
 function uploadFile(file, target, onProgress) {
+  if (RELAY) return relayUpload(file, onProgress);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     transfer.xhr = xhr;
@@ -676,7 +842,38 @@ function uploadFile(file, target, onProgress) {
   });
 }
 
+/** 어디서나(중계) 모드에서 파일 보내기: 조각마다 암호화해서 보낸다 */
+async function relayUpload(file, onProgress) {
+  const params = new URLSearchParams({ name: file.name || 'file' });
+  if (file.lastModified) params.set('lastModified', String(file.lastModified));
+  const controller = new AbortController();
+  transfer.abort = controller;
+  try {
+    const res = await request('POST', `/api/upload?${params}`, {
+      headers: { 'x-requested-with': APP_ID, 'content-type': file.type || 'application/octet-stream' },
+      body: file,
+      onUploadProgress: onProgress,
+      signal: controller.signal,
+    });
+    if (res.ok) return;
+    if (res.status === 401) showLocked('relay');
+    let message = '보내지 못했어요.';
+    try {
+      message = (await res.json()).error || message;
+    } catch {
+      // JSON이 아닌 응답
+    }
+    throw new Error(message);
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    throw err.code ? new Error('연결이 끊겼어요.') : err;
+  } finally {
+    transfer.abort = null;
+  }
+}
+
 function cancelTransfer() {
+  transfer.abort?.abort();
   transfer.cancelled = true;
   transfer.xhr?.abort();
 }
@@ -813,6 +1010,21 @@ function setupSettings() {
       }
     });
   }
+  if (settings?.relay) {
+    $('relay-form').hidden = false;
+    $('relay-url').value = settings.relay.url.replace(/^https:\/\//, '');
+    $('relay-invite').value = settings.relay.invite;
+    renderRelayStatus();
+    $('relay-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await saveSettings({ relay: { url: $('relay-url').value, invite: $('relay-invite').value } });
+        toast($('relay-url').value.trim() ? '중계 서버에 연결하는 중이에요. 잠시 뒤 [어디서나] QR이 생겨요.' : '어디서나(중계)를 껐어요.');
+      } catch (err) {
+        showError(err);
+      }
+    });
+  }
   if (state.session.canOpenLog) {
     $('log-row').hidden = false;
     $('open-log').addEventListener('click', () => post('/api/open-log').catch(showError));
@@ -899,6 +1111,19 @@ async function waitForRestart(version) {
   }
   restartingTo = null;
   toast(`업데이트가 끝나지 않은 것 같아요. 시작 메뉴에서 ${APP_NAME}을(를) 다시 실행해 주세요.`, 'error');
+}
+
+function renderRelayStatus() {
+  const relay = state.session.relay;
+  const text = !relay
+    ? '중계 서버 주소와 초대 코드를 넣으면 집 밖에서도 QR만으로 보낼 수 있어요.'
+    : relay.state === 'connected'
+      ? `● ${relay.host}에 연결됨`
+      : relay.state === 'error'
+        ? `연결하지 못했어요: ${relay.error}`
+        : `${relay.host}에 연결하는 중…`;
+  $('relay-status').textContent = text;
+  $('relay-status').classList.toggle('ok', relay?.state === 'connected');
 }
 
 const saveSettings = (patch) =>
@@ -1163,13 +1388,41 @@ async function decideRequest(decision) {
 
 // ---- 공통 도구 ----
 
+/**
+ * PC의 쏙에 요청한다. 집 Wi-Fi에서는 그냥 fetch, 어디서나(중계) 모드에서는 암호화된 통로로 보낸다.
+ * 돌려주는 값: { status, ok, json(), text(), blob() } (중계 모드는 done, 그리고 onChunk로 조각을 받을 수 있다)
+ */
+async function request(method, url, { headers = {}, body = null, onUploadProgress, onChunk, signal } = {}) {
+  if (!RELAY) {
+    const res = await fetch(url, { method, headers, body, cache: 'no-store', signal });
+    return { status: res.status, ok: res.ok, json: () => res.json(), text: () => res.text(), blob: () => res.blob() };
+  }
+  const client = await relayClient();
+  return client.request(method, url, { headers: { 'user-agent': navigator.userAgent, ...headers }, body, onUploadProgress, onChunk, signal });
+}
+
+let relayConnection = null;
+function relayClient() {
+  if (!relayConnection) {
+    relayConnection = RelayClient.connect(`wss://${location.host}/ws/c/${RELAY.pcId}`, fromHex(RELAY.secret), {
+      onClose: () => {
+        relayConnection = null; // 다음 요청 때 다시 연결한다
+      },
+    }).catch((err) => {
+      relayConnection = null;
+      throw err;
+    });
+  }
+  return relayConnection;
+}
+
 async function api(url, options = {}) {
-  const res = await fetch(url, {
-    ...options,
+  const res = await request(options.method || 'GET', url, {
+    body: options.body ?? null,
     headers: { 'X-Requested-With': APP_ID, ...options.headers },
   });
   if (res.status === 401) {
-    showLocked();
+    showLocked(RELAY ? 'relay' : undefined);
     throw new Error('다시 연결해야 해요.');
   }
   if (!res.ok) {

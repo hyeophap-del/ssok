@@ -13,7 +13,10 @@ import { PeerBook, newPeerId, cleanName, pingApp } from './src/peers.js';
 import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME, REPO } from './src/brand.js';
 import { startDiscovery } from './src/discovery.js';
 import { loadIdentity } from './src/tls.js';
-import { encodeQR, toTerminal } from './src/qr.js';
+import { encodeQR, toTerminal, toSvg } from './src/qr.js';
+import { startRelayClient } from './src/relay-client.js';
+import { runRelayHost, isRelayExe, RELAY_PORT, ADMIN_PORT } from './src/relay-host.js';
+import crypto from 'node:crypto';
 import { openPath, revealPath } from './src/open.js';
 import { openAppWindow, startTray } from './src/window.js';
 import { redactLog } from './src/logs.js';
@@ -51,6 +54,8 @@ ${APP_NAME} ${VERSION} — PC·휴대폰 사이 무선 파일 공유
   --name <이름>      다른 PC에 보일 이 PC의 이름 (기본: 컴퓨터 이름, 한 번 정하면 기억)
   --no-open          시작할 때 브라우저를 열지 않음
   --reset-token      접속 코드를 새로 만듦 (이미 연결된 휴대폰은 QR을 다시 스캔해야 함)
+  --relay            중계 서버로 실행 (늘 켜 둔 PC용. 관리 화면 http://127.0.0.1:${ADMIN_PORT}, 중계 포트 ${RELAY_PORT})
+                     exe 이름에 relay가 들어 있으면(SsokRelay.exe) 저절로 이 모드로 실행된다.
   -h, --help         이 도움말
 `;
 
@@ -65,6 +70,7 @@ function parseCli() {
         'no-open': { type: 'boolean' },
         'reset-token': { type: 'boolean' },
         launch: { type: 'boolean' },
+        relay: { type: 'boolean' },
         background: { type: 'boolean' }, // --launch가 띄우는 뒤쪽 프로세스 (직접 쓰지 않는다)
         help: { type: 'boolean', short: 'h' },
       },
@@ -94,6 +100,22 @@ function writeJson(file, data) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, file);
+}
+
+/** 중계 서버 주소 정리: 'ssok.example.com' → 'https://ssok.example.com'. 빈 값이면 ''(끄기), 이상하면 null. */
+function normalizeRelayUrl(input) {
+  const text = String(input ?? '').trim().replace(/\/+$/, '');
+  if (!text) return '';
+  const withScheme = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+  try {
+    const url = new URL(withScheme);
+    if (!/^[A-Za-z0-9.-]+$/.test(url.hostname) || url.pathname !== '/' || url.search || url.hash) return null;
+    // 시험할 때만 이 PC 안의 http 주소를 허용한다
+    if (url.protocol === 'http:' && !['127.0.0.1', 'localhost'].includes(url.hostname)) return null;
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
 }
 
 /** 설정을 저장한다. 다른 프로세스(실행기·뒤쪽 서버)가 적어 둔 값은 지우지 않고 합친다. */
@@ -345,6 +367,10 @@ async function main() {
     console.log(HELP);
     return;
   }
+  // 중계 서버 모드 (본가 PC처럼 늘 켜 둔 PC에서). 설정·데이터 폴더도 따로 쓴다.
+  if (args.relay || (EXE && isRelayExe(process.execPath))) {
+    return runRelayHost({ args, exe: EXE, sourceRoot: ROOT, version: VERSION, extractAssets });
+  }
   // exe는 창이 없는 프로그램이라, 그냥 더블클릭하면 --launch로 동작한다
   if (EXE && !args.background) args.launch = true;
 
@@ -355,6 +381,8 @@ async function main() {
   const configPath = path.join(home, 'config.json');
   const config = readJson(configPath) ?? {};
   if (!config.token || args['reset-token']) config.token = newToken();
+  // 접속 코드를 새로 만들면 어디서나(중계) 비밀 열쇠도 바꿔서 예전 휴대폰이 더는 못 들어오게 한다
+  if (args['reset-token'] && config.relay?.secret) config.relay = { ...config.relay, secret: crypto.randomBytes(32).toString('hex') };
   if (args.dir) config.dir = path.resolve(args.dir);
   if (!config.id) config.id = newPeerId();
   if (args.name !== undefined) config.name = cleanName(args.name) || undefined;
@@ -399,6 +427,46 @@ async function main() {
 
   const self = { id: config.id, name: pcName }; // 이름은 PC 화면에서 바꿀 수 있다
 
+  // ---- 어디서나 (중계 서버) ----
+  // 중계로 들어온 휴대폰 요청은 이 PC 안에서 대신 보내므로, 이 값으로 표시해 PC 화면 권한을 주지 않는다
+  const relayKey = crypto.randomBytes(24).toString('base64url');
+  let relayClient = null;
+  let relayStatus = { state: 'off' };
+  function relayInfo() {
+    const relay = config.relay;
+    if (!relay?.url) return null;
+    const host = new URL(relay.url).host;
+    const url = `${relay.url}/p/${config.id}#${relay.secret}`;
+    return { ...relayStatus, host, url, qrSvg: toSvg(encodeQR(url, { ecl: 'L' })) };
+  }
+  function startRelay() {
+    relayClient?.stop();
+    relayClient = null;
+    const relay = config.relay;
+    if (!relay?.url || !relay.invite || localOnly) {
+      relayStatus = { state: 'off' };
+      app?.broadcastHost('relay', relayInfo());
+      return;
+    }
+    relayClient = startRelayClient({
+      relayUrl: relay.url,
+      pcId: config.id,
+      pcAuth: relay.auth,
+      invite: relay.invite,
+      secret: Buffer.from(relay.secret, 'hex'),
+      name: pcName,
+      version: VERSION,
+      localPort: port,
+      cookie: `${APP_ID}=${config.token}`,
+      relayKey,
+      log: logEvent,
+      onStatus: (status) => {
+        relayStatus = status;
+        app?.broadcastHost('relay', relayInfo());
+      },
+    });
+  }
+
   // 새 버전 확인 (exe로 설치했을 때만. 시험할 때는 SSOK_UPDATE_URL로 다른 곳을 가리킬 수 있다)
   const releasesUrl = process.env.SSOK_UPDATE_URL ?? (EXE ? `https://github.com/${REPO}/releases` : null);
   const updateCore = releasesUrl
@@ -435,6 +503,8 @@ async function main() {
     publicDir: path.join(ROOT, 'public'),
     lanAddresses: () => (localOnly ? [{ address: '127.0.0.1', iface: '이 PC에서만 (--host 127.0.0.1)' }] : lanAddresses()),
     tailscaleAddress: () => (localOnly ? null : tailscaleAddress()),
+    relayKey,
+    relayInfo: () => relayInfo(),
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self,
@@ -444,9 +514,27 @@ async function main() {
         name: pcName,
         autostart: shortcutsSupported() ? fs.existsSync(startupShortcut(APP_NAME)) : null,
         autoUpdate: updater ? config.autoUpdate !== false : null,
+        relay: { url: config.relay?.url ?? '', invite: config.relay?.invite ?? '', ...relayStatus },
         version: VERSION,
       }),
-      set: async ({ name, autostart, autoUpdate }) => {
+      set: async ({ name, autostart, autoUpdate, relay }) => {
+        if (relay !== undefined) {
+          const url = normalizeRelayUrl(relay.url);
+          if (url === null) throw Object.assign(new Error('중계 서버 주소를 확인해 주세요. 예: ssok.example.com'), { status: 400 });
+          const invite = String(relay.invite || '').trim().toUpperCase();
+          if (url && !/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(invite)) throw Object.assign(new Error('초대 코드를 확인해 주세요. 예: ABCD-EFGH'), { status: 400 });
+          // 주소를 지우면 어디서나 기능을 끈다. 비밀 값들은 처음 한 번 만들고 계속 쓴다 (휴대폰에 저장된 QR이 그대로 되게).
+          config.relay = url
+            ? {
+                url,
+                invite,
+                auth: config.relay?.auth || crypto.randomBytes(24).toString('base64url'),
+                secret: config.relay?.secret || crypto.randomBytes(32).toString('hex'),
+              }
+            : undefined;
+          saveConfig(configPath, config);
+          startRelay();
+        }
         if (autoUpdate !== undefined && updater) {
           config.autoUpdate = Boolean(autoUpdate);
           if (autoUpdate) updater.check();
@@ -532,6 +620,7 @@ async function main() {
     process.exit(1);
   }
   config.port = port;
+  startRelay(); // 어디서나(중계) 연결은 포트가 정해진 뒤에 시작한다
   saveConfig(configPath, config);
 
   const addresses = localOnly ? [{ address: '127.0.0.1' }] : lanAddresses();
@@ -604,6 +693,7 @@ async function main() {
     }
     discovery?.close();
     tray?.close();
+    relayClient?.stop();
     await Promise.race([app.close(), new Promise((r) => setTimeout(r, 1000))]);
     process.exit(0);
   }

@@ -1,6 +1,6 @@
 {
   "name": "ssok",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "PC와 휴대폰 사이에서 같은 Wi-Fi로 파일과 텍스트를 주고받는 도구",
   "type": "module",
   "private": true,

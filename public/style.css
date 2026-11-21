@@ -215,6 +215,18 @@ p { margin: 0; }
 .switch-row input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--accent); flex: none; }
 .btn.quit { justify-self: start; color: var(--danger); }
 .setting .connect-row input { font: inherit; font-size: 14px; }
+.setting > input {
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.setting > input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+#relay-status.ok { color: var(--success); font-weight: 600; }
 
 .help summary { cursor: pointer; font-weight: 700; list-style: none; display: flex; justify-content: space-between; }
 .help summary::-webkit-details-marker { display: none; }

@@ -158,6 +158,8 @@ export function createApp(options) {
     publicDir,
     lanAddresses = () => [],
     tailscaleAddress = () => null, // Tailscale을 켜 두었으면 집 밖에서도 들어올 수 있는 주소
+    relayKey = null, // 중계 서버를 거쳐 온 휴대폰 요청에 붙는 값 (이 PC에서 온 것처럼 보여도 PC 화면 권한은 주지 않는다)
+    relayInfo = () => null, // 어디서나(중계) 주소와 연결 상태
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -195,7 +197,7 @@ export function createApp(options) {
   const staticFiles = new Map();
   for (const name of fs.readdirSync(publicDir)) {
     const type = STATIC_TYPES[path.extname(name)];
-    if (type) staticFiles.set(name, { path: path.join(publicDir, name), type });
+    if (type && !name.startsWith('relay-admin')) staticFiles.set(name, { path: path.join(publicDir, name), type }); // 중계 서버 관리 화면 파일은 내주지 않는다
   }
 
   const onRequest = (req, res) => {
@@ -234,7 +236,9 @@ export function createApp(options) {
     if (peer !== undefined) {
       return { isHost: false, authed: Boolean(peer), peer, giveCookie: false, device: peer?.name ?? '다른 PC' };
     }
-    const isHost = isHostAddress(req.socket.remoteAddress);
+    // 중계로 온 휴대폰 요청은 이 PC 안에서 대신 보낸 것이라 주소만 보면 PC 화면처럼 보인다. 표시를 보고 휴대폰으로 대한다.
+    const viaRelay = Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey);
+    const isHost = !viaRelay && isHostAddress(req.socket.remoteAddress);
     // PC 자신의 요청이라도 다른 웹사이트가 몰래 보낸 요청이면 믿지 않는다.
     const site = req.headers['sec-fetch-site'];
     const trustedSite = !site || site === 'same-origin' || site === 'none';
@@ -359,6 +363,7 @@ export function createApp(options) {
       receivedDir,
       addresses,
       tailscale: anywhere || null,
+      relay: relayInfo(),
       port,
       name: self.name,
       peerSupport: Boolean(peers),
@@ -403,6 +408,7 @@ export function createApp(options) {
           name: typeof patch?.name === 'string' ? patch.name : undefined,
           autostart: typeof patch?.autostart === 'boolean' ? patch.autostart : undefined,
           autoUpdate: typeof patch?.autoUpdate === 'boolean' ? patch.autoUpdate : undefined,
+          relay: patch?.relay && typeof patch.relay === 'object' ? { url: String(patch.relay.url ?? ''), invite: String(patch.relay.invite ?? '') } : undefined,
         });
       } catch (err) {
         if (!err.status) log('error', err);

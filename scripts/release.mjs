@@ -4,6 +4,7 @@
 //   --skip-tests, --skip-android  시험 삼아 빨리 만들 때
 // 결과: dist/release/v<버전>/
 //   Ssok-<버전>.exe, ssok-<버전>.apk   받는 사람이 내려받는 파일
+//   SsokRelay-<버전>.exe               중계 서버용 (같은 exe. 이름에 Relay가 들어 있으면 중계 서버로 실행된다)
 //   latest.json, latest.json.sig       설치된 쏙이 새 버전을 확인할 때 읽는 정보와 그 서명
 //   notes.md                           GitHub 릴리스 설명
 // 마지막에 GitHub에 올리는 명령을 보여 준다 (올리는 것은 공개되는 일이라 따로 실행한다).
@@ -59,6 +60,8 @@ const describe = (from, name) => {
   return { name, size: data.length, sha256: crypto.createHash('sha256').update(data).digest('hex') };
 };
 const exe = describe(path.join(ROOT, 'dist', `${APP_NAME}.exe`), `Ssok-${version}.exe`);
+// 중계 서버(늘 켜 둔 PC용)는 같은 exe를 이름만 바꿔 올린다. 업데이트 정보에는 넣지 않는다 (중계 서버도 Ssok exe로 업데이트한다)
+describe(path.join(ROOT, 'dist', `${APP_NAME}.exe`), `SsokRelay-${version}.exe`);
 const apk = fs.existsSync(path.join(ROOT, 'public', 'ssok.apk')) ? describe(path.join(ROOT, 'public', 'ssok.apk'), `ssok-${version}.apk`) : null;
 
 // PC 화면에는 글자 그대로 보이므로 마크다운 굵게 표시(**)는 뺀다 (GitHub 설명에는 그대로 둔다)
@@ -75,6 +78,7 @@ fs.writeFileSync(
     `- **Windows**: \`Ssok-${version}.exe\`를 내려받아 실행하세요. 처음 실행하면 스스로 설치되고, 이미 설치되어 있으면 새 버전으로 바뀝니다.`,
     '  "Windows의 PC 보호" 창이 뜨면 [추가 정보] → [실행]을 누르세요.',
     '- **안드로이드 앱**: PC의 쏙 화면(휴대폰으로 QR 스캔)에서 받는 것을 권장합니다. 직접 받으려면 `ssok-' + version + '.apk`.',
+    `- **중계 서버** (선택, 늘 켜 둔 PC용): \`SsokRelay-${version}.exe\`. 집 밖에서도 보내기 위한 것으로, 설정 방법은 README의 ‘어디서나 (중계 서버)’를 보세요.`,
     '',
     `<sub>exe SHA-256: \`${exe.sha256}\`</sub>`,
   ].join('\n'),

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{{APP_NAME}} 중계 서버</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    .admin { max-width: 720px; margin: 0 auto; padding: 4px 16px 40px; display: grid; gap: 16px; }
+    .card > h2 + p { margin-top: 6px; }
+    .card p { margin: 8px 0 0; }
+    .lead { font-size: 14px; color: var(--muted); }
+    .field-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .field-row input {
+      flex: 1 1 220px; min-width: 0; min-height: 40px; padding: 8px 12px; border-radius: 12px;
+      border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font: inherit; font-size: 14px;
+    }
+    .field-row input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
+    .steps { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
+    .step { display: flex; gap: 10px; align-items: flex-start; color: var(--muted); }
+    .step .mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; font-size: 12px; font-weight: 700; background: var(--surface-2); }
+    .step.active { color: var(--text); font-weight: 600; }
+    .step.active .mark { background: var(--accent); color: var(--on-accent); animation: pulse 1.2s ease-in-out infinite; }
+    .step.done .mark { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
+    .step.failed { color: var(--danger); }
+    .step.failed .mark { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+    .step .note { display: block; font-weight: 400; color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .error-box { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); font-size: 13px; }
+    .address { font-size: 20px; font-weight: 800; letter-spacing: -0.01em; margin-top: 8px; word-break: break-all; }
+    .facts { display: grid; gap: 4px; margin-top: 10px; font-size: 14px; }
+    .ok { color: var(--success); font-weight: 600; }
+    .bad { color: var(--danger); font-weight: 600; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .invites { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 10px; }
+    .invite { border: 1px solid var(--border); border-radius: 14px; padding: 12px; display: grid; gap: 8px; }
+    .invite.disabled { opacity: 0.6; }
+    .invite-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .invite-label { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .invite-code { font: 700 16px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.06em; user-select: all; }
+    .pcs { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+    .pc { display: flex; align-items: center; gap: 8px; }
+    .pc-name { font-weight: 600; }
+    .pc .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+    .pc .dot.on { background: var(--success); }
+    .pc .btn { margin-left: auto; }
+    .howto { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); font-size: 13px; }
+    .log { margin: 10px 0 0; padding: 10px; border-radius: 10px; background: var(--surface-2); font: 12px ui-monospace, Consolas, monospace; white-space: pre-wrap; max-height: 160px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/icon.svg" alt="" width="30" height="30">
+      <span>{{APP_NAME}} 중계 서버</span>
+    </div>
+    <div id="status" class="status" data-state="connecting" role="status">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="status-text">확인 중…</span>
+    </div>
+  </header>
+
+  <main class="admin">
+    <section id="relay-error" class="card warning" role="alert" hidden>
+      <strong>중계 서버를 켜지 못했어요</strong>
+      <p id="relay-error-text" class="small"></p>
+    </section>
+
+    <section class="card" aria-labelledby="addr-title">
+      <h2 id="addr-title">인터넷 주소</h2>
+      <div id="addr-done" hidden>
+        <div id="addr-value" class="address"></div>
+        <div class="facts">
+          <div id="tunnel-fact"></div>
+          <div id="reach-fact"></div>
+        </div>
+        <div class="actions">
+          <button id="recheck" class="btn small" type="button">바깥에서 접속 다시 확인</button>
+          <button id="change-addr" class="btn small ghost" type="button">주소 바꾸기</button>
+        </div>
+      </div>
+      <form id="setup-form" hidden>
+        <p class="lead">Cloudflare에 등록해 둔 도메인 아래에 이 중계 서버의 주소를 정해 주세요. 이 PC가 그 주소로 인터넷과 이어져요. 공유기 설정은 필요 없어요.</p>
+        <div class="field-row">
+          <input id="hostname" type="text" placeholder="예: ssok.example.com" autocomplete="off" spellcheck="false" aria-label="중계 서버 주소">
+          <button id="setup-start" class="btn primary" type="submit">연결하기</button>
+        </div>
+      </form>
+      <ol id="steps" class="steps" hidden></ol>
+      <div id="setup-error" class="error-box" role="alert" hidden>
+        <span id="setup-error-text"></span>
+        <div class="actions">
+          <button id="setup-retry" class="btn small" type="button">다시 시도</button>
+          <button id="setup-relogin" class="btn small" type="button" hidden>Cloudflare 다시 로그인</button>
+        </div>
+      </div>
+      <details id="tunnel-log-box" class="help" hidden>
+        <summary class="small">터널 기록</summary>
+        <pre id="tunnel-log" class="log"></pre>
+      </details>
+    </section>
+
+    <section class="card" aria-labelledby="inv-title">
+      <h2 id="inv-title">초대 코드</h2>
+      <p class="lead">이 중계 서버를 쓸 사람마다 초대 코드를 하나씩 만들어 주세요. 코드 하나로 그 사람의 PC 여러 대를 연결할 수 있고, 코드를 막으면 그 PC들은 바로 끊겨요.</p>
+      <form id="invite-form" class="field-row">
+        <input id="invite-label" type="text" placeholder="누구에게? 예: 나, 엄마, 민수" maxlength="40" autocomplete="off" aria-label="초대 코드 이름">
+        <button class="btn primary" type="submit">초대 코드 만들기</button>
+      </form>
+      <ul id="invites" class="invites"></ul>
+      <p id="howto" class="howto" hidden></p>
+    </section>
+
+    <section class="card settings" aria-labelledby="set-title">
+      <h2 id="set-title">설정</h2>
+      <label id="autostart-row" class="switch-row" hidden>
+        <input id="autostart" type="checkbox">
+        <span>PC에 로그인하면 자동으로 실행<br><span class="muted small">꺼져 있으면 집 밖에서 보낼 수 없어요. 이 PC는 잠자기 모드로 들어가지 않게 해 두세요.</span></span>
+      </label>
+      <label id="autoupdate-row" class="switch-row" hidden>
+        <input id="autoupdate" type="checkbox">
+        <span>새 버전 자동 업데이트<br><span id="version-text" class="muted small"></span></span>
+      </label>
+      <div class="actions">
+        <button id="open-log" class="btn small" type="button">실행 기록 열기</button>
+        <button id="quit" class="btn small quit" type="button">중계 서버 끄기</button>
+      </div>
+    </section>
+  </main>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script type="module" src="/relay-admin.js"></script>
+</body>
+</html>
