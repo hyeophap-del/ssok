@@ -120,15 +120,35 @@ p { margin: 0; }
   gap: 16px;
 }
 .app.host .layout { grid-template-columns: 320px minmax(0, 1fr); align-items: start; }
-.app.host .side { position: sticky; top: 72px; display: grid; gap: 16px; }
+/*
+ * 왼쪽 칸: 320px를 넘지 않게 한다 (줄바꿈 없는 긴 글자가 있어도 카드가 가운데를 덮지 않게: minmax(0, 1fr)).
+ * 카드가 많아 화면보다 길면 왼쪽 칸만 따로 스크롤한다 (고정된 채로 아래쪽 설정에 닿지 못하는 일이 없게).
+ * 카드 그림자가 잘리지 않게 안쪽 여백을 조금 두고, 그만큼 바깥으로 넓힌다.
+ */
+.app.host .side {
+  position: sticky;
+  top: 72px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  max-height: calc(100vh - 80px);
+  max-height: calc(100dvh - 80px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  margin: -6px -8px 0;
+  padding: 6px 8px 12px;
+}
 .app.remote .layout { max-width: 640px; }
 .main { display: grid; gap: 16px; min-width: 0; }
 
 .app.host .remote-only, .app.remote .host-only { display: none !important; }
 
+/* 창이 좁으면 한 줄로: 보내기·목록을 먼저, QR·설정은 그 아래에 */
 @media (max-width: 860px) {
-  .app.host .layout { grid-template-columns: 1fr; }
-  .app.host .side { position: static; }
+  .app.host .layout { grid-template-columns: minmax(0, 1fr); }
+  .app.host .side { position: static; max-height: none; overflow: visible; margin: 0; padding: 0; }
+  .app.host .main { order: -1; }
 }
 
 .card {
@@ -510,9 +530,9 @@ p { margin: 0; }
 .remote-code { margin-top: 10px; padding: 12px; border-radius: 14px; background: var(--accent-soft); text-align: center; }
 .remote-code .code { letter-spacing: 0.12em; }
 .remote-code p { margin: 8px 0 0; }
-.drops-card { display: grid; gap: 8px; }
+.drops-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .drops-card > p { margin: 0; }
-.drops { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.drops { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .drop-row { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); font-size: 13px; }
 .drop-info { flex: 1; min-width: 0; }
 .drop-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

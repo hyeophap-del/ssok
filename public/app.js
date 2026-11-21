@@ -242,8 +242,9 @@ function renderDrops() {
       const info = el('div', { class: 'drop-info' });
       info.append(
         el('div', { class: 'drop-name', title: link.label }, link.label),
-        el('div', { class: 'drop-sub', title: link.url ?? link.name }, `${link.url ? link.url.replace(/^https:\/\//, '') : link.name} · 비밀번호 ${link.pin}`),
-        el('div', { class: 'muted' }, `${left}${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
+        // 좁은 왼쪽 칸에서도 비밀번호가 잘리지 않게 주소와 나머지를 다른 줄에 둔다
+        el('div', { class: 'drop-sub', title: link.url ?? link.name }, link.url ? link.url.replace(/^https:\/\//, '') : link.name),
+        el('div', { class: 'muted' }, `비밀번호 ${link.pin} · ${left}${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
       );
       const row = el('li', { class: 'drop-row', 'data-drop': link.id });
       row.append(
