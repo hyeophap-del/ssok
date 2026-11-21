@@ -8,7 +8,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createApp, newToken, isPartialUpload, VERSION } from './src/app.js';
 import { Store } from './src/store.js';
-import { lanAddresses, broadcastAddresses } from './src/net.js';
+import { lanAddresses, broadcastAddresses, tailscaleAddress } from './src/net.js';
 import { PeerBook, newPeerId, cleanName, pingApp } from './src/peers.js';
 import { APP_NAME, APP_ID, APP_DIR, RECEIVED_DIR_NAME, REPO } from './src/brand.js';
 import { startDiscovery } from './src/discovery.js';
@@ -434,6 +434,7 @@ async function main() {
     store,
     publicDir: path.join(ROOT, 'public'),
     lanAddresses: () => (localOnly ? [{ address: '127.0.0.1', iface: '이 PC에서만 (--host 127.0.0.1)' }] : lanAddresses()),
+    tailscaleAddress: () => (localOnly ? null : tailscaleAddress()),
     opener: { open: openPath, reveal: revealPath },
     warnings: () => networkWarnings,
     self,
@@ -547,6 +548,8 @@ async function main() {
   } else {
     console.log('  ⚠ Wi-Fi나 유선 네트워크 연결을 찾지 못했어요. 네트워크에 연결한 뒤 다시 실행하세요.');
   }
+  const ts = localOnly ? null : tailscaleAddress();
+  if (ts) console.log(`  어디서나      http://${ts.address}:${port}/?k=${config.token}  (Tailscale)`);
   console.log(`  PC 화면       ${pcUrl}`);
   console.log(`  PC 이름       ${pcName}  (다른 PC에 이 이름으로 보여요)`);
   console.log(`  받은 파일     ${receivedDir}`);

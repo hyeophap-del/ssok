@@ -242,7 +242,10 @@ public class UploadService extends Service {
         }
     }
 
-    /** 연결이 안 되면 같은 Wi-Fi에서 PC를 다시 찾아(IP가 바뀌었을 수 있다) 한 번 더 시도한다 */
+    /**
+     * 지금 주소로 연결이 안 되면 PC의 다른 주소(집 밖이면 Tailscale 주소 등)를 써 보고,
+     * 그래도 안 되면 같은 Wi-Fi에서 PC를 다시 찾아(IP가 바뀌었을 수 있다) 한 번 더 시도한다.
+     */
     private void withRediscovery(Store.Pc pc, Attempt attempt) throws Exception {
         try {
             attempt.run();
@@ -250,17 +253,35 @@ public class UploadService extends Service {
             throw e;
         } catch (Exception first) {
             notifications.notify(PROGRESS_ID, progress(pc.name + " 찾는 중…", 0, 0, true));
-            String[] found = Net.find(pc.id, 3000);
+            String[] found = null;
+            for (String alt : new ArrayList<>(pc.alts)) {
+                if (isThatPc(pc, alt, pc.port)) {
+                    found = new String[] {alt, String.valueOf(pc.port)};
+                    break;
+                }
+            }
+            if (found == null) {
+                String[] answer = Net.find(pc.id, 3000);
+                if (answer != null && isThatPc(pc, answer[0], Integer.parseInt(answer[1]))) found = answer;
+            }
             if (found == null) throw first;
-            String host = found[0];
-            int port = Integer.parseInt(found[1]);
-            // 저장해 둔 인증서로만 확인한다. 같은 Wi-Fi의 다른 기기가 그 PC인 척 답해도 여기서 걸러진다.
-            Net.Result ping = Net.json(host, port, "GET", "/api/ping", null, null, pc.fingerprint, 5000);
-            if (ping.status != 200 || !pc.id.equals(ping.json.optString("id"))) throw first;
-            pc.host = host;
-            pc.port = port;
+            // 이전 주소도 다른 주소 목록에 남겨 둔다 (집에 돌아오면 다시 쓴다)
+            if (!pc.alts.contains(pc.host)) pc.alts.add(pc.host);
+            pc.alts.remove(found[0]);
+            pc.host = found[0];
+            pc.port = Integer.parseInt(found[1]);
             Store.save(this, pc);
             attempt.run();
+        }
+    }
+
+    /** 그 주소에 있는 것이 정말 연결해 둔 그 PC인지 (저장해 둔 인증서로만 확인한다. 다른 기기가 그 PC인 척 답해도 걸러진다) */
+    private static boolean isThatPc(Store.Pc pc, String host, int port) {
+        try {
+            Net.Result ping = Net.json(host, port, "GET", "/api/ping", null, null, pc.fingerprint, 4000);
+            return ping.status == 200 && pc.id.equals(ping.json.optString("id"));
+        } catch (Exception e) {
+            return false;
         }
     }
 

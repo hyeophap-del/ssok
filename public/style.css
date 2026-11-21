@@ -142,6 +142,14 @@ p { margin: 0; }
 
 /* ---- QR ---- */
 .qr-card { text-align: center; }
+.qr-tabs { display: inline-flex; gap: 4px; margin: 10px 0 2px; padding: 3px; border-radius: 999px; background: var(--surface-2); }
+.qr-tab { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 999px; cursor: pointer; }
+.qr-tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.anywhere-help { margin-top: 12px; text-align: left; font-size: 13px; }
+.anywhere-help summary { cursor: pointer; color: var(--accent); font-weight: 600; text-align: center; }
+.anywhere-help ol { margin: 8px 0 0; padding-left: 18px; color: var(--muted); display: grid; gap: 6px; }
+.anywhere-help b { color: var(--text); }
+.anywhere-help a { color: var(--accent); }
 .qr {
   margin: 14px auto 10px;
   width: min(232px, 100%);

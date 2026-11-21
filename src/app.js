@@ -157,6 +157,7 @@ export function createApp(options) {
     store,
     publicDir,
     lanAddresses = () => [],
+    tailscaleAddress = () => null, // Tailscale을 켜 두었으면 집 밖에서도 들어올 수 있는 주소
     isHostAddress = (addr) => isOwnAddress(addr),
     opener = { open() {}, reveal() {} },
     warnings = () => [],
@@ -265,6 +266,8 @@ export function createApp(options) {
         name: self.name,
         // 휴대폰 앱이 새 버전이 있는지 알 수 있게 이 PC가 가진 앱 버전을 알려 준다
         ...(staticFiles.has(`${APP_ID}.apk`) ? { android: ANDROID_VERSION_CODE } : {}),
+        // 이 PC에 닿을 수 있는 주소들. 휴대폰 앱이 기억해 두었다가 지금 주소가 안 되면(집 밖 등) 차례로 써 본다.
+        addrs: [...lanAddresses().map((a) => a.address), ...[tailscaleAddress()?.address].filter(Boolean)],
         // 이 PC에서 물어보면 실행 파일 위치도 알려 준다 (새 버전 exe가 예전 것을 바꿀 때 쓴다)
         ...(ctx.isHost ? { exe: process.execPath } : {}),
       });
@@ -348,10 +351,14 @@ export function createApp(options) {
       const url = `http://${address}:${port}/?k=${token}`;
       return { address, iface, url, qrSvg: toSvg(encodeQR(url)) };
     });
+    const ts = tailscaleAddress();
+    const anywhere = ts && { address: ts.address, url: `http://${ts.address}:${port}/?k=${token}` };
+    if (anywhere) anywhere.qrSvg = toSvg(encodeQR(anywhere.url));
     return {
       ...info,
       receivedDir,
       addresses,
+      tailscale: anywhere || null,
       port,
       name: self.name,
       peerSupport: Boolean(peers),

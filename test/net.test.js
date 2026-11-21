@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lanAddresses, isAllowedHost, isOwnAddress, broadcastAddresses } from '../src/net.js';
+import { lanAddresses, isAllowedHost, isOwnAddress, broadcastAddresses, tailscaleAddress } from '../src/net.js';
 
 const iface = (address, extra = {}) => ({ address, family: 'IPv4', internal: false, ...extra });
 
@@ -52,4 +52,15 @@ test('이 PC에서 온 요청인지 판단한다', () => {
   assert.equal(isOwnAddress('::1', interfaces), true);
   assert.equal(isOwnAddress('::ffff:192.168.0.32', interfaces), true);
   assert.equal(isOwnAddress('192.168.0.77', interfaces), false);
+});
+
+test('Tailscale 주소는 집 네트워크 목록에서 빼고 ‘어디서나’ 주소로 따로 찾는다', () => {
+  const interfaces = {
+    'Wi-Fi': [iface('192.168.0.32')],
+    Tailscale: [iface('100.101.102.103'), { address: 'fd7a:115c:a1e0::1', family: 'IPv6', internal: false }],
+  };
+  assert.deepEqual(lanAddresses(interfaces).map((a) => a.address), ['192.168.0.32']);
+  assert.deepEqual(tailscaleAddress(interfaces), { address: '100.101.102.103', iface: 'Tailscale' });
+  assert.equal(tailscaleAddress({ 'Wi-Fi': [iface('192.168.0.32')] }), null);
+  assert.equal(tailscaleAddress({ 'Wi-Fi': [iface('100.70.1.2')] }), null, '통신사 주소(100.64/10)라도 Tailscale 어댑터가 아니면 아니다');
 });

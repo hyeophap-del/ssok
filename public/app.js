@@ -107,6 +107,7 @@ function setupHost() {
   $('open-folder').addEventListener('click', () => post('/api/open-folder').catch(showError));
   setupSettings();
 
+  setupAnywhere();
   if (addresses.length) {
     showAddress(0);
   } else {
@@ -132,6 +133,37 @@ function setupHost() {
 
   if (state.session.peerSupport) setupPeers();
   else document.querySelector('.targets').hidden = true;
+}
+
+// 집 Wi-Fi QR과 '어디서나'(Tailscale) QR을 탭으로 바꿔 보여 준다
+const QR_TAB_KEY = `${APP_ID}.qrTab`;
+
+function setupAnywhere() {
+  const { tailscale } = state.session;
+  if (!tailscale) return; // 없으면 '집 밖에서도 쓰려면?' 안내만 보인다
+  $('anywhere-help').hidden = true;
+  $('qr-tabs').hidden = false;
+  $('self-anywhere').hidden = false;
+  $('self-anywhere-address').textContent = state.session.port === 8765 ? tailscale.address : `${tailscale.address}:${state.session.port}`;
+  const select = (tab) => {
+    if (!$('qr')) return; // 집 네트워크를 못 찾은 경우
+    store.set(QR_TAB_KEY, tab);
+    const anywhere = tab === 'anywhere';
+    $('qr-tab-home').setAttribute('aria-selected', String(!anywhere));
+    $('qr-tab-anywhere').setAttribute('aria-selected', String(anywhere));
+    $('addr-picker').hidden = anywhere || state.session.addresses.length < 2;
+    if (anywhere) {
+      $('qr').innerHTML = tailscale.qrSvg; // 서버가 만든 SVG
+      $('addr-url').textContent = tailscale.url;
+      $('qr-hint').textContent = 'Tailscale을 켠 휴대폰은 집 밖에서도 이 QR 주소로 열려요.';
+    } else {
+      showAddress(Number($('addr-select').value || 0));
+      $('qr-hint').textContent = '휴대폰 카메라로 QR 코드를 스캔하면 바로 열려요.';
+    }
+  };
+  $('qr-tab-home').addEventListener('click', () => select('home'));
+  $('qr-tab-anywhere').addEventListener('click', () => select('anywhere'));
+  if (store.get(QR_TAB_KEY, 'home') === 'anywhere') queueMicrotask(() => select('anywhere'));
 }
 
 function showAddress(index) {

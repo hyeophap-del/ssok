@@ -34,9 +34,21 @@
 
         <section class="card qr-card">
           <h2>휴대폰 연결</h2>
-          <p class="muted">휴대폰 카메라로 QR 코드를 스캔하면 바로 열려요.</p>
+          <div id="qr-tabs" class="qr-tabs" role="tablist" hidden>
+            <button id="qr-tab-home" class="qr-tab" type="button" role="tab" aria-selected="true">집 Wi-Fi</button>
+            <button id="qr-tab-anywhere" class="qr-tab" type="button" role="tab" aria-selected="false">어디서나 (Tailscale)</button>
+          </div>
+          <p id="qr-hint" class="muted">휴대폰 카메라로 QR 코드를 스캔하면 바로 열려요.</p>
           <div id="qr" class="qr" aria-label="휴대폰 접속용 QR 코드"></div>
           <code id="addr-url" class="addr-url"></code>
+          <details id="anywhere-help" class="anywhere-help">
+            <summary>집 밖에서도 쓰려면?</summary>
+            <ol>
+              <li>이 PC와 휴대폰에 무료 앱 <b>Tailscale</b>을 설치해요 (<a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">tailscale.com/download</a>, 휴대폰은 앱 스토어에서 ‘Tailscale’).</li>
+              <li>두 기기 모두 <b>같은 계정</b>(구글 등)으로 로그인하고 연결을 켜요.</li>
+              <li>잠시 뒤 이 카드에 <b>[어디서나]</b> 탭이 생기면, 그 QR을 휴대폰으로 스캔해요. 그 주소는 집에서도 밖에서도 열려요.</li>
+            </ol>
+          </details>
           <label id="addr-picker" class="addr-picker" hidden>
             <span>네트워크</span>
             <select id="addr-select"></select>
@@ -233,7 +245,7 @@
         <input id="connect-address" type="text" placeholder="예: 192.168.0.40" autocomplete="off" spellcheck="false" required>
         <button class="btn" type="submit">연결</button>
       </div>
-      <p class="muted small">이 PC는 <b id="self-name"></b> · 주소 <code id="self-address" class="inline-code"></code></p>
+      <p class="muted small">이 PC는 <b id="self-name"></b> · 주소 <code id="self-address" class="inline-code"></code><span id="self-anywhere" hidden> · 밖에서는 <code id="self-anywhere-address" class="inline-code"></code></span></p>
     </form>
   </dialog>
 

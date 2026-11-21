@@ -207,7 +207,7 @@ test('확인 숫자는 6자리이고, 인증서나 난수 중 하나만 달라�
 
 test('ping에 이름과 고유 번호가 나오고, 같은 포트에서 HTTPS로도 응답한다', async () => {
   const plain = await request(pcs.A, { path: '/api/ping', from: '127.0.0.2' });
-  assert.deepEqual(plain.json, { app: APP_ID, version: plain.json.version, id: IDS.A, name: 'PC-A', android: plain.json.android });
+  assert.deepEqual(plain.json, { app: APP_ID, version: plain.json.version, id: IDS.A, name: 'PC-A', android: plain.json.android, addrs: [] });
   assert.ok(Number.isInteger(plain.json.android), '휴대폰 앱이 새 버전을 알 수 있게 앱 버전 번호를 알려 준다');
   assert.equal(plain.json.exe, undefined, '실행 파일 위치는 이 PC에서 물을 때만 알려 준다');
   const secure = await request(pcs.A, { path: '/api/ping', secure: true });

@@ -21,6 +21,7 @@ export function lanAddresses(interfaces = os.networkInterfaces()) {
       const family = typeof entry.family === 'number' ? `IPv${entry.family}` : entry.family;
       if (family !== 'IPv4' || entry.internal) continue;
       if (entry.address.startsWith('169.254.')) continue; // 자동 할당(APIPA) 주소: 실제 네트워크가 아님
+      if (isTailscale(iface, entry.address)) continue; // Tailscale은 '어디서나' 주소로 따로 보여 준다
       let score = 0;
       if (WIRELESS.test(iface)) score += 3;
       if (WIRED.test(iface)) score += 2;
@@ -33,6 +34,28 @@ export function lanAddresses(interfaces = os.networkInterfaces()) {
   return found
     .sort((a, b) => b.score - a.score)
     .map(({ address, iface }) => ({ address, iface }));
+}
+
+/** Tailscale이 준 주소인지 (100.64.0.0/10 대역, Tailscale 어댑터) */
+function isTailscale(iface, address) {
+  const [a, b] = address.split('.').map(Number);
+  const cgnat = a === 100 && b >= 64 && b <= 127;
+  return cgnat && (/tailscale/i.test(iface) || /^utun/.test(iface));
+}
+
+/**
+ * Tailscale 주소. Tailscale을 켠 휴대폰·PC는 집 밖에서도 이 주소로 이 PC에 바로 들어올 수 있다.
+ * Tailscale이 없거나 꺼져 있으면 null.
+ * @returns {{ address: string, iface: string } | null}
+ */
+export function tailscaleAddress(interfaces = os.networkInterfaces()) {
+  for (const [iface, entries] of Object.entries(interfaces)) {
+    for (const entry of entries || []) {
+      const family = typeof entry.family === 'number' ? `IPv${entry.family}` : entry.family;
+      if (family === 'IPv4' && !entry.internal && isTailscale(iface, entry.address)) return { address: entry.address, iface };
+    }
+  }
+  return null;
 }
 
 const ipToInt = (ip) => ip.split('.').reduce((n, part) => n * 256 + Number(part), 0);
