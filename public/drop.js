@@ -233,6 +233,7 @@ function renderInbox(items) {
 const downloading = new Set(); // 받는 중인 항목 번호
 async function downloadItem(item, button) {
   if (downloading.has(item.id)) return;
+  if (item.size > 500 * 1024 * 1024 && !confirm(`‘${item.name}’은(는) ${formatSize(item.size)}예요. 이 기기의 메모리에 모았다가 저장해서, 휴대폰에서는 받다가 멈출 수 있어요. 가능하면 PC에서 받아 주세요.\n\n그래도 받을까요?`)) return;
   downloading.add(item.id);
   button.disabled = true;
   const label = button.textContent;

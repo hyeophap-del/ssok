@@ -79,14 +79,76 @@ public class MainActivity extends Activity {
     private void showAppUpdate(Store.Pc pc) {
         LinearLayout card = Ui.card(this);
         Ui.add(card, Ui.heading(this, "새 버전 앱이 있어요"), 0);
-        Ui.add(card, Ui.muted(this, pc.name + "에서 받을 수 있어요. 받은 파일을 눌러 설치하면 연결은 그대로 남아요."), 4);
-        Ui.add(card, Ui.button(this, "새 버전 받기", true, v -> {
-            Uri apk = Uri.parse("http://" + pc.host + ":" + pc.port + "/" + Net.APP_ID + ".apk");
-            startActivity(new Intent(Intent.ACTION_VIEW, apk));
-        }), 12);
+        Ui.add(card, Ui.muted(this, pc.name + "에서 받아 바로 설치해요. 연결은 그대로 남아요."), 4);
+        final android.widget.Button[] button = new android.widget.Button[1];
+        button[0] = Ui.button(this, "새 버전 받기", true, v -> installUpdate(pc, button[0]));
+        Ui.add(card, button[0], 12);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         params.topMargin = Ui.dp(this, 16);
         column.addView(card, 2, params);
+    }
+
+    /**
+     * 새 버전 앱을 연결해 둔 PC에서 받는다. 같은 Wi-Fi의 다른 기기가 바꿔치기하지 못하게 PC 인증서로 고정한 HTTPS로 받고,
+     * 이 앱(같은 패키지)의 더 높은 버전인지 확인한 뒤 안드로이드 설치기에 넘긴다 (서명이 다르면 설치기가 거절한다).
+     */
+    private void installUpdate(Store.Pc pc, android.widget.Button button) {
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            android.widget.Toast.makeText(this, "‘쏙’이 앱을 설치할 수 있게 허용한 뒤, 돌아와서 다시 눌러 주세요.", android.widget.Toast.LENGTH_LONG).show();
+            startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        button.setEnabled(false);
+        button.setText("받는 중…");
+        new Thread(() -> {
+            java.io.File apk = new java.io.File(getCacheDir(), "update.apk");
+            try {
+                javax.net.ssl.HttpsURLConnection c = Net.open(pc.host, pc.port, "/" + Net.APP_ID + ".apk", pc.fingerprint, null);
+                try {
+                    c.setConnectTimeout(5000);
+                    c.setReadTimeout(30000);
+                    if (c.getResponseCode() != 200) throw new java.io.IOException("PC에서 새 버전을 찾지 못했어요.");
+                    try (java.io.InputStream in = c.getInputStream(); java.io.OutputStream out = new java.io.FileOutputStream(apk)) {
+                        copyAll(in, out);
+                    }
+                } finally {
+                    c.disconnect();
+                }
+                android.content.pm.PackageInfo info = getPackageManager().getPackageArchiveInfo(apk.getPath(), 0);
+                long code = info == null ? -1 : Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+                if (info == null || !getPackageName().equals(info.packageName) || code <= myVersionCode()) {
+                    throw new java.io.IOException("받은 파일이 이 앱의 새 버전이 아니에요.");
+                }
+                android.content.pm.PackageInstaller installer = getPackageManager().getPackageInstaller();
+                android.content.pm.PackageInstaller.SessionParams params =
+                        new android.content.pm.PackageInstaller.SessionParams(android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+                params.setAppPackageName(getPackageName());
+                int sessionId = installer.createSession(params);
+                try (android.content.pm.PackageInstaller.Session session = installer.openSession(sessionId)) {
+                    try (java.io.InputStream in = new java.io.FileInputStream(apk); java.io.OutputStream out = session.openWrite("ssok.apk", 0, apk.length())) {
+                        copyAll(in, out);
+                        session.fsync(out);
+                    }
+                    int flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? android.app.PendingIntent.FLAG_MUTABLE : 0);
+                    android.app.PendingIntent done = android.app.PendingIntent.getBroadcast(this, sessionId, new Intent(this, InstallResult.class), flags);
+                    session.commit(done.getIntentSender());
+                }
+                runOnUiThread(() -> button.setText("설치 화면을 여는 중…"));
+            } catch (Exception e) {
+                apk.delete();
+                runOnUiThread(() -> {
+                    button.setEnabled(true);
+                    button.setText("새 버전 받기");
+                    android.widget.Toast.makeText(this, "새 버전을 받지 못했어요. " + Net.describe(e), android.widget.Toast.LENGTH_LONG).show();
+                });
+            }
+        }).start();
+    }
+
+    private static void copyAll(java.io.InputStream in, java.io.OutputStream out) throws java.io.IOException {
+        byte[] buf = new byte[64 * 1024];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
     }
 
     private void render() {

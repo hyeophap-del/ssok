@@ -210,3 +210,8 @@ test('제어 프레임이 크거나 PC가 이상한 링크 목록을 보내도 �
   assert.equal(relay.overview().invites.flatMap((i) => i.pcs).find((p) => p.id === 'f0f0f0f0f0f0f0f0')?.name.includes('\n'), false, '이름의 줄바꿈은 뺀다');
   pcSock.close();
 });
+
+test('PC는 중계 서버의 버전을 안다 (예전 버전이면 PC 화면에서 업데이트하라고 알리려고)', async () => {
+  await waitFor(() => client.status().state === 'connected');
+  assert.equal(client.status().relayVersion, 'test');
+});

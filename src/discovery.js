@@ -3,6 +3,7 @@
 import dgram from 'node:dgram';
 import { cleanName, isValidPort, PEER_ID } from './peers.js';
 import { APP_ID } from './brand.js';
+import { isLocalNetworkAddress } from './net.js';
 
 export const DISCOVERY_PORT = 8765;
 const APP = APP_ID;
@@ -51,15 +52,27 @@ export async function startDiscovery({ self, onPeer, targets, port = DISCOVERY_P
   socket.setBroadcast(true);
   socket.on('error', (err) => log('discovery-error', err));
 
+  // 답하는 횟수 제한 (보낸 주소를 속인 요청으로 다른 곳에 패킷을 쏟아붓는 데 쓰이지 않게)
+  let replyWindow = 0;
+  let replies = 0;
+  const canReply = () => {
+    const now = Date.now();
+    if (now - replyWindow > 1000) {
+      replyWindow = now;
+      replies = 0;
+    }
+    return ++replies <= 20;
+  };
   socket.on('message', (buffer, rinfo) => {
+    if (!isLocalNetworkAddress(rinfo.address)) return; // 같은 네트워크에서 온 것만
     const msg = parseAnnouncement(buffer);
     if (!msg || msg.id === self().id) return;
     if (msg.type === 'find') {
-      socket.send(message('here'), rinfo.port, rinfo.address, ignore); // 휴대폰 앱에게 이 PC의 주소를 알려 준다
+      if (canReply()) socket.send(message('here'), rinfo.port, rinfo.address, ignore); // 휴대폰 앱에게 이 PC의 주소를 알려 준다
       return;
     }
     // 새로 켜진 PC가 인사하면 바로 답해서, 서로 30초를 기다리지 않고 찾게 한다
-    if (msg.type === 'hello') socket.send(message('here'), rinfo.port, rinfo.address, ignore);
+    if (msg.type === 'hello' && canReply()) socket.send(message('here'), rinfo.port, rinfo.address, ignore);
     onPeer({ id: msg.id, name: msg.name, port: msg.port, address: rinfo.address });
   });
 

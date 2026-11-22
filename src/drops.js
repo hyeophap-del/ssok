@@ -12,7 +12,7 @@ const RESERVED = new Set(['api', 'admin', 'relay', 'ssok', 'www', 'app', 'static
 const MAX_LINKS = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_WRONG = 10; // 비밀번호를 이만큼 틀리면 잠시 막는다
-const LOCK_MS = 10 * 60_000;
+const LOCK_MS = 10 * 60_000; // 처음 막는 시간. 또 막힐 때마다 두 배로 (하루까지)
 const AUTO_LETTERS = 'abcdefghjkmnpqrstuvwxyz23456789'; // 헷갈리는 0/o, 1/l/i 제외
 
 export function cleanLinkName(input) {
@@ -20,10 +20,13 @@ export function cleanLinkName(input) {
   return LINK_NAME.test(name) && !name.includes('--') && !RESERVED.has(name) ? name : null;
 }
 
+/** 저장된 링크의 비밀번호 (예전에 만든 4자리도 계속 쓴다) */
 export const isValidPin = (pin) => typeof pin === 'string' && /^\S{4,20}$/.test(pin);
+/** 새로 만드는 링크의 비밀번호: 6자 이상 (4자리는 하루 이틀이면 다 넣어 볼 수 있다) */
+export const isStrongPin = (pin) => typeof pin === 'string' && /^\S{6,20}$/.test(pin);
 
-/** 링크를 만들 때 미리 채워 줄 비밀번호 (숫자 4자리) */
-export const suggestPin = () => String(crypto.randomInt(0, 10_000)).padStart(4, '0');
+/** 링크를 만들 때 미리 채워 줄 비밀번호 (숫자 6자리) */
+export const suggestPin = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
 
 export class DropBook {
   constructor(file, { now = Date.now } = {}) {
@@ -31,7 +34,9 @@ export class DropBook {
     this.now = now;
     this.links = [];
     this.saveTimer = null;
-    this.wrong = new Map(); // 링크 번호 → { count, since } (비밀번호 틀린 횟수)
+    this.wrong = new Map(); // 링크 번호 → { count, since, lockouts, lockedUntil, lastWrongAt } (비밀번호 틀린 기록)
+    this.onLock = null; // (link, { minutes, times }) 비밀번호를 너무 많이 틀려 막았을 때 (PC 주인에게 알린다)
+    this.onGone = null; // (link) 기간이 지나 지운 링크 (중계 서버의 이름과 보내 둔 파일을 정리한다)
   }
 
   load() {
@@ -71,7 +76,9 @@ export class DropBook {
     const gone = this.links.filter((l) => !this.isLive(l));
     if (gone.length) {
       this.links = this.links.filter((l) => this.isLive(l));
+      for (const l of gone) this.wrong.delete(l.id);
       this.saveNow();
+      for (const l of gone) this.onGone?.(l);
     }
     return gone;
   }
@@ -102,7 +109,7 @@ export class DropBook {
       throw Object.assign(new Error('링크 이름은 영문 소문자·숫자·-로 3~30자예요. 예: minsu, mom-2'), { status: 400 });
     }
     if (this.links.some((l) => l.name === clean)) throw Object.assign(new Error(`‘${clean}’은(는) 이미 쓰고 있어요.`), { status: 409 });
-    if (!isValidPin(pin)) throw Object.assign(new Error('비밀번호는 띄어쓰기 없이 4~20자로 정해 주세요.'), { status: 400 });
+    if (!isStrongPin(pin)) throw Object.assign(new Error('비밀번호는 띄어쓰기 없이 6~20자로 정해 주세요. (숫자만 쓴다면 6자리 이상)'), { status: 400 });
     const span = DROP_DAYS.includes(Number(days)) ? Number(days) : 7;
     const cleanLabel = String(label ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 40);
     const link = {
@@ -139,19 +146,42 @@ export class DropBook {
 
   /**
    * 비밀번호 확인: 'ok' | 'wrong' | 'locked'.
-   * 10번 틀리면 10분 동안은 맞아도 막는다 (짐작으로 맞히지 못하게).
+   * 10분 안에 10번 틀리면 막고, 막힌 동안은 맞아도 들이지 않는다 (짐작으로 맞히지 못하게).
+   * 막는 시간은 10분에서 시작해 또 막힐 때마다 두 배(하루까지). 하루 동안 틀린 적이 없으면 처음부터 다시 센다.
    */
   checkPin(link, pin) {
-    const entry = this.wrong.get(link.id);
-    if (entry && this.now() - entry.since > LOCK_MS) this.wrong.delete(link.id);
-    const current = this.wrong.get(link.id);
-    if (current && current.count >= MAX_WRONG) return 'locked';
+    const now = this.now();
+    let entry = this.wrong.get(link.id);
+    if (entry && !(entry.lockedUntil > now) && now - entry.lastWrongAt > DAY_MS) {
+      this.wrong.delete(link.id);
+      entry = undefined;
+    }
+    if (entry?.lockedUntil > now) return 'locked';
+    if (entry?.lockedUntil) Object.assign(entry, { lockedUntil: 0, count: 0, since: now }); // 막힌 시간이 지났다
+    if (entry && now - entry.since > LOCK_MS) Object.assign(entry, { count: 0, since: now }); // 띄엄띄엄 틀린 것은 새로 센다
     const given = Buffer.from(String(pin ?? ''));
     const expected = Buffer.from(link.pin);
     if (given.length === expected.length && crypto.timingSafeEqual(given, expected)) return 'ok';
     if (pin === undefined || pin === '') return 'wrong'; // 아직 넣지 않았다: 세지 않는다
-    if (current) current.count++;
-    else this.wrong.set(link.id, { count: 1, since: this.now() });
+    if (!entry) {
+      entry = { count: 0, since: now, lockouts: 0, lockedUntil: 0, lastWrongAt: now };
+      this.wrong.set(link.id, entry);
+    }
+    entry.count++;
+    entry.lastWrongAt = now;
+    if (entry.count >= MAX_WRONG) {
+      const ms = Math.min(DAY_MS, LOCK_MS * 2 ** entry.lockouts);
+      entry.lockedUntil = now + ms;
+      entry.lockouts++;
+      link.lockCount = (link.lockCount || 0) + 1;
+      link.lastLockAt = now;
+      this.saveSoon();
+      try {
+        this.onLock?.(link, { minutes: Math.round(ms / 60_000), times: entry.lockouts });
+      } catch {
+        // 알림이 실패해도 막는 것은 그대로
+      }
+    }
     return 'wrong';
   }
 

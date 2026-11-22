@@ -357,6 +357,8 @@ function logEvent(type, payload) {
     console.log(`  [${time}] ${payload} 연결 해제됨`);
   } else if (type === 'upload-cancelled') {
     console.log(`  [${time}] 전송 취소됨: ${payload}`);
+  } else if (type === 'drop-lock') {
+    console.log(`  [${time}] ${payload}`);
   } else if (type === 'error') {
     console.error(`  [${time}] 오류: ${payload?.stack || payload}`);
   }
@@ -581,6 +583,13 @@ async function main() {
     },
     onQuit: () => shutdown(),
     onShow: () => showWindow(),
+    notify: (title, text) => {
+      try {
+        tray?.balloon(title, text);
+      } catch {
+        // 아이콘이 아직 없다
+      }
+    },
     openLog: () => openLogForSharing(home, config.token),
     onHostPagesClosed: () => {
       // 창을 처음 닫았을 때 한 번만: 꺼진 게 아니라 알림 영역에서 계속 받고 있다고 알려 준다

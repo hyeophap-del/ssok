@@ -33,6 +33,7 @@ let store;
 let client;
 let clock = Date.now();
 const relayed = [];
+const alerts = []; // 비밀번호를 너무 많이 틀려 막았다는 알림
 const realSend = WsConnection.prototype.send;
 
 function local(method, urlPath, { headers = {}, body } = {}) {
@@ -107,6 +108,11 @@ before(async () => {
     relayLinks: { claim: (name, id) => client.claimLink(name, id), release: (name) => client.releaseLink(name) },
   });
   await new Promise((r) => app.server.listen(0, '127.0.0.1', r));
+  const original = drops.onLock;
+  drops.onLock = (link, info) => {
+    alerts.push({ link: link.name, ...info });
+    original?.(link, info);
+  };
 
   const statuses = [];
   client = startRelayClient({
@@ -155,14 +161,15 @@ test('PC 화면에서 이름과 비밀번호로 링크를 만든다 (중계 서�
   assert.equal(lookup.linkId, made.json.id);
 
   // 이름을 비우면 자동으로 짧은 이름을 정한다
-  const auto = await host('POST', '/api/drops', { label: '엄마', name: '', pin: '1234', days: 0 });
+  const auto = await host('POST', '/api/drops', { label: '엄마', name: '', pin: '123456', days: 0 });
   assert.equal(auto.status, 201);
   assert.match(auto.json.name, /^[a-z2-9]{6}$/);
   assert.equal(auto.json.expiresAt, null, '끌 때까지 쓰는 링크');
 
-  assert.equal((await host('POST', '/api/drops', { name: 'minsu', pin: '1234' })).status, 409, '이 PC에서 이미 쓰는 이름');
-  assert.equal((await host('POST', '/api/drops', { name: 'Bad Name!', pin: '1234' })).status, 400);
+  assert.equal((await host('POST', '/api/drops', { name: 'minsu', pin: '123456' })).status, 409, '이 PC에서 이미 쓰는 이름');
+  assert.equal((await host('POST', '/api/drops', { name: 'Bad Name!', pin: '123456' })).status, 400);
   assert.equal((await host('POST', '/api/drops', { name: 'short-pin', pin: '12' })).status, 400);
+  assert.equal((await host('POST', '/api/drops', { name: 'four-pin', pin: '1234' })).status, 400, '새 링크는 비밀번호 6자 이상 (4자리는 너무 쉽게 맞힌다)');
 
   // 같은 중계 서버를 쓰는 다른 PC가 같은 이름을 쓰려 하면 거절된다
   const other = new WebSocket(`${relayBase.replace('http', 'ws')}/ws/pc`);
@@ -252,6 +259,20 @@ test('비밀번호가 틀리면 열리지 않고, 10번 틀리면 10분 동안 �
   clock += 11 * 60_000;
   assert.equal((await right.request('GET', '/api/drop-info')).status, 200, '10분이 지나면 다시 된다');
   right.close();
+  const links = (await host('GET', '/api/drops')).json.links;
+  assert.equal(links.find((l) => l.name === 'minsu').lockCount, 1, 'PC 화면에 막힌 기록이 보인다');
+
+  // 또 10번 틀리면 이번에는 20분 (막힐 때마다 두 배)
+  const again = await openLink('minsu', 'still-wrong');
+  for (let i = 0; i < 10; i++) await again.request('GET', '/api/drop-info');
+  again.close();
+  const later = await openLink('minsu', PIN);
+  clock += 11 * 60_000;
+  assert.equal((await (await later.request('GET', '/api/drop-info')).json()).code, 'locked', '두 번째는 10분으로 풀리지 않는다');
+  clock += 10 * 60_000;
+  assert.equal((await later.request('GET', '/api/drop-info')).status, 200, '20분이 지나면 풀린다');
+  later.close();
+  assert.equal(alerts.length, 2, '막힐 때마다 PC 주인에게 알린다');
 });
 
 test('PC 쪽 중계 연결을 건너뛰어도 쏙 서버가 한 번 더 막는다', async () => {
@@ -267,14 +288,18 @@ test('PC 쪽 중계 연결을 건너뛰어도 쏙 서버가 한 번 더 막는�
 test('링크를 끄거나 기간이 지나면 막히고 이름도 놓아준다', async () => {
   const link = (await host('GET', '/api/drops')).json.links.find((l) => l.name === 'minsu');
   const minsu = await openLink('minsu', PIN);
+  const kept = store.list().filter((i) => i.to === link.id);
+  assert.ok(kept.length > 0, '앞 시험에서 이 링크로 보내 둔 파일이 있다');
   assert.equal((await host('DELETE', `/api/drops/${link.id}`)).status, 204);
+  assert.equal(store.list().some((i) => i.to === link.id), false, '링크를 끄면 그 사람에게 보내 둔 것도 지운다');
+  for (const item of kept) if (item.kind === 'file') assert.equal(fs.existsSync(item.path), false, '보내 둔 파일도 지운다');
   assert.equal((await minsu.request('GET', '/api/drop-info')).status, 410, '열려 있던 화면도 바로 막힌다');
   minsu.close();
   await waitFor(async () => (await fetch(`${relayBase}/api/link/minsu`)).status === 404);
 
-  const short = (await host('POST', '/api/drops', { label: '잠깐', name: 'jamkkan', pin: '5555', days: 1 })).json;
+  const short = (await host('POST', '/api/drops', { label: '잠깐', name: 'jamkkan', pin: '555555', days: 1 })).json;
   clock += 2 * 86_400_000;
-  await assert.rejects(openLink('jamkkan', '5555'), (err) => err.code === 'UNKNOWN_PEER');
+  await assert.rejects(openLink('jamkkan', '555555'), (err) => err.code === 'UNKNOWN_PEER');
   assert.equal((await host('GET', '/api/drops')).json.links.some((l) => l.id === short.id), false);
 });
 
@@ -293,7 +318,7 @@ test('중계 서버는 /<링크 이름>으로 링크 화면을 내준다', async
 
 test('중계로 온 요청 본문에 다른 요청을 몰래 붙여도 PC 화면 권한을 얻지 못한다 (요청 밀반입)', async () => {
   // 링크 이름만 아는 사람: 틀린 비밀번호로 열고, 본문 길이를 5라고 해 놓고 그 뒤에 PC 화면만 할 수 있는 요청을 붙인다
-  assert.equal((await host('POST', '/api/drops', { label: '시험', name: 'smuggle-test', pin: '5678', days: 1 })).status, 201);
+  assert.equal((await host('POST', '/api/drops', { label: '시험', name: 'smuggle-test', pin: '567890', days: 1 })).status, 201);
   await waitFor(async () => (await fetch(`${relayBase}/api/link/smuggle-test`)).ok);
   const pc = await openLink('smuggle-test', 'wrong-pin');
   const port = app.server.address().port;

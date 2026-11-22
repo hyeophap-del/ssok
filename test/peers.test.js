@@ -279,6 +279,10 @@ test('휴대폰이나 연결된 PC는 PC 화면 전용 기능을 쓸 수 없고,
   assert.equal((await request(pcs.B, { path: '/api/items', headers: asPeer, secure: true })).status, 403);
   assert.equal((await request(pcs.B, { path: '/api/events', headers: asPeer, secure: true })).status, 403);
   assert.equal((await request(pcs.B, { path: '/api/files/0123456789abcdef', headers: asPeer, secure: true })).status, 403);
+  // 큰 파일을 보내기 전에 받을 수 있는지 묻는다 (저장 공간이 모자라면 본문을 보내기 전에 안다)
+  assert.equal((await request(pcs.B, { path: '/api/upload-check?size=1000', headers: asPeer, secure: true })).status, 204);
+  assert.equal((await request(pcs.B, { path: `/api/upload-check?size=${10 ** 15}`, headers: asPeer, secure: true })).status, 507);
+  assert.equal((await request(pcs.B, { path: '/api/upload-check?size=1000', headers: { Authorization: 'Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, secure: true })).status, 401);
 
   const overPlainHttp = await request(pcs.B, { path: '/api/upload?name=x', headers: asPeer });
   assert.equal(overPlainHttp.status, 401, '평문(HTTP)으로 온 키는 맞아도 받지 않는다');

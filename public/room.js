@@ -193,6 +193,7 @@ function closeRoom() {
   outgoing.clear();
   incoming.clear();
   keyHolders.clear();
+  missedTexts.clear();
   for (const node of $('log').querySelectorAll('a[download], img')) {
     const url = node.href || node.src;
     if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
@@ -270,6 +271,7 @@ async function openRoomOnce(options) {
     if (change?.left) {
       toast(`${change.left.device}이(가) 나갔어요.`);
       keyHolders.delete(change.left.id);
+      missedTexts.delete(change.left.id);
       if (target === change.left.id) {
         target = 0;
         toast('보낼 곳이 ‘모두’로 바뀌었어요.');
@@ -403,6 +405,7 @@ const WINDOW = 8 * 1024 * 1024;
 const STUCK_MS = 15_000; // 이만큼 아무 소식 없이 뒤처진 기기는 빼고 마저 보낸다 (잠든 휴대폰, 방 열쇠를 아직 못 받은 기기 등)
 const LATE_MS = 4000; // 이만큼 소식이 없으면 '○○ 기다리는 중'으로 알린다
 const skipping = new Set(); // 지금 보내는 파일에서 뺀 기기들 (중계 서버도 그 기기에는 보내지 않는다)
+const missedTexts = new Map(); // 뺀 동안 '모두'에게 보낸 글: 기기 번호 → [{ id, text }] (그 기기가 다시 소식을 보내오면 따로 보낸다)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function sendFiles(files) {
@@ -555,7 +558,9 @@ function finishIfDone(id, job) {
 async function sendText(text) {
   if (!peer?.ready) throw new Error('방 열쇠를 받은 뒤에 보낼 수 있어요.');
   if (!others().length) throw new Error('아직 방에 다른 기기가 없어요.');
-  await peer.send(target, FRAME.TEXT, nextId++, { text });
+  const id = nextId++;
+  await peer.send(target, FRAME.TEXT, id, { text });
+  if (target === 0) for (const who of skipping) missedTexts.set(who, [...(missedTexts.get(who) || []), { id, text }]);
   const view = addRow('out', 'i-text', text, target === 0 ? '모두' : nameOf(target));
   view.dir.textContent = '보냄';
 }
@@ -571,6 +576,12 @@ const decodeJson = (payload) => {
 
 function onFrame(from, type, id, payload) {
   const key = `${from}:${id}`;
+  // 멈췄던 기기가 다시 소식을 보냈다: 그동안 못 받은 글을 따로 보낸다
+  const missed = missedTexts.get(from);
+  if (missed && !skipping.has(from)) {
+    missedTexts.delete(from);
+    for (const m of missed) peer?.send(from, FRAME.TEXT, m.id, { text: m.text }).catch(() => {});
+  }
   if (type === FRAME.FILE_HEAD) {
     const head = decodeJson(payload);
     const name = String(head.name || '파일').slice(0, 200);

@@ -49,6 +49,7 @@ public class UploadService extends Service {
     private static final String CHANNEL_PROGRESS = "progress";
     private static final String CHANNEL_RESULT = "result";
     private static final int PROGRESS_ID = 1;
+    private static final long PREFLIGHT_BYTES = 1024 * 1024; // 이보다 큰 파일은 보내기 전에 받을 수 있는지 묻는다
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private NotificationManager notifications;
@@ -302,6 +303,19 @@ public class UploadService extends Service {
         });
         try {
             if (relay == null) relay = Relay.connect(pc.relay, pc.id, Store.appId(this), Relay.peerSecret(pc.key), Store.deviceName(this), 15000);
+            // 큰 파일: 받을 수 있는지 먼저 묻는다 (데이터로 다 올린 뒤에 거절당하지 않게). 암호화된 통로 안의 답이라 믿을 수 있다.
+            if (path.startsWith("/api/upload") && length >= PREFLIGHT_BYTES) {
+                Relay.Response pre = relay.request("GET", "/api/upload-check?size=" + length, headers, null, 0, null);
+                if (pre.status == 401 || pre.status == 507) {
+                    JSONObject pj;
+                    try {
+                        pj = new JSONObject(pre.body == null ? "" : pre.body);
+                    } catch (Exception e) {
+                        pj = new JSONObject();
+                    }
+                    check(pre.status, pj);
+                }
+            }
             Relay.Response r;
             try (InputStream in = opener.open()) {
                 if (in == null) throw new RejectedException("파일을 읽을 수 없어요.");
@@ -406,7 +420,15 @@ public class UploadService extends Service {
         return pc.name + "에 연결하지 못했어요. " + hint + "\n(원인: " + Net.describe(e) + ")";
     }
 
+    /** 큰 파일은 보내기 전에 PC가 받을 수 있는지 묻는다 (연결 해제·저장 공간 부족을 '연결 안 됨'으로 착각하지 않게). 예전 PC(404)면 그냥 보낸다. */
+    private static void preflight(Store.Pc pc, long size) throws Exception {
+        if (size < PREFLIGHT_BYTES) return;
+        Net.Result r = Net.json(pc.host, pc.port, "GET", "/api/upload-check?size=" + size, null, pc.key, pc.fingerprint, 8000);
+        if (r.status == 401 || r.status == 507) check(r.status, r.json);
+    }
+
     private void upload(Store.Pc pc, String name, long size, long lastModified, int index, int total, Opener opener) throws Exception {
+        preflight(pc, size);
         String path = "/api/upload?name=" + URLEncoder.encode(name, "UTF-8") + (lastModified > 0 ? "&lastModified=" + lastModified : "");
         HttpsURLConnection c = Net.open(pc.host, pc.port, path, pc.fingerprint, null);
         try {

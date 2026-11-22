@@ -183,6 +183,7 @@ export function createApp(options) {
     onShow = null, // PC 화면 창을 열거나 앞으로 가져오기 (시작 메뉴로 다시 실행했을 때)
     openLog = null, // 접속 코드를 가린 실행 기록을 열기 (문제가 생겼을 때 보내 달라고 할 파일)
     onHostPagesClosed = () => {}, // 열려 있던 PC 화면이 모두 닫혔을 때
+    notify = null, // (title, text) PC 화면이 닫혀 있을 때 알림 영역 말풍선
     log = () => {},
   } = options;
 
@@ -326,7 +327,7 @@ export function createApp(options) {
       rejectBody(req, res);
       const reasons = {
         wrong: '비밀번호가 맞지 않아요.',
-        locked: '비밀번호를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요.',
+        locked: '비밀번호를 너무 많이 틀려 잠시 막혔어요. 나중에 다시 해 주세요.',
         gone: '이 링크는 꺼졌거나 기간이 지났어요.',
       };
       return sendJson(res, ctx.dropError === 'gone' ? 410 : 401, { error: reasons[ctx.dropError], code: ctx.dropError });
@@ -382,6 +383,7 @@ export function createApp(options) {
     if (peers && (await peers.handle(req, res, url, ctx))) return;
     // 연결된 다른 PC·안드로이드 앱은 보내기 통로일 뿐: 이 PC의 받은 목록을 보거나 지우지 못한다
     if (ctx.peer) {
+      if (pathname === '/api/upload-check' && method === 'GET') return uploadCheck(res, url);
       if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
       if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
       rejectBody(req, res);
@@ -390,6 +392,7 @@ export function createApp(options) {
     if (pathname === '/api/session' && method === 'GET') return sendJson(res, 200, session(ctx, req));
     if (pathname === '/api/items' && method === 'GET') return sendJson(res, 200, { items: store.list().filter(visibleTo(ctx)).map(publicItem) });
     if (pathname === '/api/events' && method === 'GET') return events(req, res, ctx);
+    if (pathname === '/api/upload-check' && method === 'GET') return uploadCheck(res, url);
     if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
     if (pathname === '/api/settings' && (method === 'GET' || method === 'POST')) return settingsApi(req, res, ctx);
@@ -483,7 +486,7 @@ export function createApp(options) {
 /** 받기 링크 목록 (PC 화면용). 링크 주소는 중계 서버를 설정했을 때만 만들 수 있다. */
   function dropList() {
     const base = relayUrl();
-    return drops.list().map(({ id, name, pin, label, createdAt, expiresAt, count, bytes }) => ({
+    return drops.list().map(({ id, name, pin, label, createdAt, expiresAt, count, bytes, lockCount, lastLockAt }) => ({
       id,
       name,
       pin, // PC 화면에서 다시 알려 줄 수 있게 보여 준다 (이 PC 안에만 있다)
@@ -492,6 +495,8 @@ export function createApp(options) {
       expiresAt,
       count,
       bytes,
+      lockCount: lockCount || 0, // 비밀번호를 너무 많이 틀려 막힌 횟수
+      lastLockAt: lastLockAt || null,
       url: base ? `${base}/${name}` : null,
     }));
   }
@@ -536,7 +541,7 @@ export function createApp(options) {
       rejectBody(req, res);
       const removed = drops.remove(m[1]);
       if (!removed) return sendJson(res, 404, { error: '이미 없는 링크예요.' });
-      relayLinks?.release(removed.name);
+      await forgetLink(removed);
       broadcastHost('drops', dropList());
       return sendEmpty(res);
     }
@@ -661,9 +666,22 @@ export function createApp(options) {
       cleanupItem(old);
       broadcast('remove', { id: old.id });
     }
+    if (item.from !== 'host') notifyReceived(item);
     // 링크 상대에게 보낸 것은 PC 화면에만 알린다 (그 사람은 링크 화면에서 따로 받아 간다)
     for (const client of clients) if (!item.to || client.isHost) writeEvent(client.res, 'add', publicItem(item));
     log('add', item);
+  }
+
+  /**
+   * 큰 파일을 보내기 전에 받을 수 있는지 미리 묻는다 (앱): 연결이 해제됐거나(401) 저장 공간이 모자라면(507)
+   * 본문을 다 보내기 전에 알 수 있다. 본문을 보내는 중에 거절하면 보내는 쪽은 '연결이 끊김'으로만 안다.
+   */
+  async function uploadCheck(res, url) {
+    const size = Number(url.searchParams.get('size'));
+    if (!Number.isSafeInteger(size) || size < 0) return sendJson(res, 400, { error: '크기를 확인해 주세요.' });
+    const free = await freeSpace(receivedDir);
+    if (free !== null && size > free) return sendJson(res, 507, { error: 'PC 저장 공간이 부족해요.' });
+    return sendEmpty(res);
   }
 
   async function upload(req, res, url, ctx) {
@@ -785,6 +803,37 @@ export function createApp(options) {
     };
     addItem(item);
     return sendJson(res, 201, publicItem(item));
+  }
+
+  /** 꺼지거나 기간이 지난 링크: 중계 서버의 이름을 놓아주고, 그 사람에게 보내려고 둔 파일도 지운다 */
+  async function forgetLink(link) {
+    relayLinks?.release(link.name);
+    const items = store.list().filter((i) => i.to === link.id);
+    for (const item of items) {
+      store.remove(item.id);
+      broadcastHost('remove', { id: item.id });
+    }
+    await Promise.all(items.map((item) => cleanupItem(item)));
+  }
+
+  // PC 화면이 닫혀 있을 때 받은 것을 알림 영역 말풍선으로 알린다 (한꺼번에 오면 모아서 한 번)
+  let notifyTimer = null;
+  let notifyCount = 0;
+  let notifyLast = null;
+  function notifyReceived(item) {
+    if (!notify || hasHostPage()) return;
+    notifyCount++;
+    notifyLast = item;
+    if (notifyTimer) return;
+    notifyTimer = setTimeout(() => {
+      notifyTimer = null;
+      const count = notifyCount;
+      const last = notifyLast;
+      notifyCount = 0;
+      const what = last.kind === 'text' ? `텍스트 "${String(last.text).replace(/\s+/g, ' ').slice(0, 60)}"` : last.name;
+      notify(count > 1 ? `${count}개를 받았어요` : `${last.device || '다른 기기'}에서 받았어요`, count > 1 ? `마지막: ${what}` : what);
+    }, 1500);
+    notifyTimer.unref?.();
   }
 
   async function removeItem(res, id) {
@@ -914,6 +963,22 @@ export function createApp(options) {
 
   function hasHostPage() {
     return [...clients].some((c) => c.isHost);
+  }
+
+  if (drops) {
+    // 기간이 지난 링크 정리 (아무도 PC 화면을 안 봐도)
+    drops.onGone = (link) => forgetLink(link).catch((err) => log('error', err));
+    const pruneTimer = setInterval(() => drops.prune().length && broadcastHost('drops', dropList()), 10 * 60_000);
+    pruneTimer.unref?.();
+    // 비밀번호를 너무 많이 틀려 막았다: PC 주인에게 알린다
+    drops.onLock = (link, { minutes, times }) => {
+      const span = minutes >= 60 ? `${Math.round(minutes / 60)}시간` : `${minutes}분`;
+      const text = `‘${link.label}’ 링크의 비밀번호를 누가 여러 번 틀려서 ${span} 동안 막았어요${times > 1 ? ` (${times}번째)` : ''}. 모르는 사람이 시도하는 것 같으면 링크를 끄세요.`;
+      log('drop-lock', text);
+      broadcastHost('drop-alert', { id: link.id, text });
+      broadcastHost('drops', dropList());
+      if (notify && !hasHostPage()) notify('링크 비밀번호를 여러 번 틀렸어요', text);
+    };
   }
 
   return { server, broadcast, broadcastHost, close, clients, peers, hasHostPage };

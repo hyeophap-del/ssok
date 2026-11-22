@@ -458,7 +458,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
       online.get(msg.id)?.ws.close(4000, 'replaced');
       const entry = { ws, invite: invite.code, name };
       online.set(msg.id, entry);
-      ws.sendJson({ t: 'ok' });
+      ws.sendJson({ t: 'ok', version });
       log('relay-pc', `${name} 연결됨`);
       // 오래 아무 말이 없으면 끊긴 연결로 보고 닫는다 (PC가 곧 다시 연결한다)
       let heard = Date.now();

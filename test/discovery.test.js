@@ -76,3 +76,11 @@ test('휴대폰 앱이 PC를 찾으면 답만 하고, 주변 PC 목록에는 넣
     pc.close();
   }
 });
+
+test('같은 네트워크(사설·링크 로컬·Tailscale) 주소에만 답한다', async () => {
+  const { isLocalNetworkAddress } = await import('../src/net.js');
+  for (const a of ['192.168.0.5', '10.1.2.3', '172.20.0.1', '169.254.1.1', '100.101.102.103', '127.0.0.1', '::ffff:192.168.1.9', 'fe80::1', 'fd12::3', '::1']) {
+    assert.equal(isLocalNetworkAddress(a), true, a);
+  }
+  for (const a of ['8.8.8.8', '1.2.3.4', '172.32.0.1', '100.128.0.1', '2001:db8::1', '::ffff:8.8.4.4']) assert.equal(isLocalNetworkAddress(a), false, a);
+});

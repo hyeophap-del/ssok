@@ -23,6 +23,7 @@ let store;
 let receivedDir;
 let outboxDir;
 const opened = [];
+const notes = []; // 알림 영역 말풍선
 
 async function start() {
   app = createApp({
@@ -34,6 +35,7 @@ async function start() {
     isHostAddress: (addr) => addr.replace(/^::ffff:/, '') === '127.0.0.1',
     lanAddresses: () => [{ address: '192.168.0.32', iface: 'Wi-Fi' }],
     opener: { open: (p) => opened.push(['open', p]), reveal: (p) => opened.push(['reveal', p]) },
+    notify: (title, text) => notes.push({ title, text }),
   });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   host.port = remote.port = app.server.address().port;
@@ -405,4 +407,24 @@ test('아이폰 단축어: 주소에 접속 코드를 담아 이름 없이 보�
 
   const session = await request(remote, { path: '/api/session', headers: cookie });
   assert.equal(session.json.shortcutUrl, `http://127.0.0.1:${remote.port}/api/upload?k=${TOKEN}`);
+});
+
+test('PC 화면이 닫혀 있을 때 받으면 알림 영역 말풍선으로 알린다 (한꺼번에 오면 한 번)', async () => {
+  await new Promise((r) => setTimeout(r, 1800)); // 앞 시험에서 받은 것의 알림이 먼저 끝나게
+  notes.length = 0;
+  await upload(remote, '알림1.jpg', 'A', cookie);
+  await upload(remote, '알림2.jpg', 'B', cookie);
+  await new Promise((r) => setTimeout(r, 1800));
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].title, '2개를 받았어요');
+  assert.match(notes[0].text, /알림2\.jpg/);
+});
+
+test('다른 기기에서 받은 실행 파일은 [열기]를 눌러도 실행하지 않고 폴더에서 보여 준다', async () => {
+  const res = await upload(remote, '설치.exe', 'MZ', cookie);
+  const { id } = JSON.parse(res.body.toString());
+  opened.length = 0;
+  const open = await request(host, { method: 'POST', path: `/api/items/${id}/open`, headers: XRW });
+  assert.equal(open.status, 200);
+  assert.deepEqual(opened.map(([action]) => action), ['reveal']);
 });

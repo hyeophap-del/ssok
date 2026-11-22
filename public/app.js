@@ -163,7 +163,7 @@ function setupDrops() {
     $('drop-new').hidden = open;
     if (!open) return;
     $('drop-host').textContent = `${state.session.relay?.host ?? ''}/`;
-    $('drop-pin').value = String(Math.floor(Math.random() * 10_000)).padStart(4, '0'); // 바꿔도 된다
+    $('drop-pin').value = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, '0'); // 바꿔도 된다 (6자 이상)
     $('drop-label').focus();
   };
   $('drop-new').addEventListener('click', () => openForm(true));
@@ -207,6 +207,13 @@ function setupDrops() {
     const link = state.session.drops.find((l) => l.id === row.dataset.drop);
     if (!link) return;
     if (e.target.closest('[data-copy]')) return copyDropLink(link);
+    const reveal = e.target.closest('[data-pin]');
+    if (reveal) {
+      // 옆 사람이 화면을 봐도 비밀번호가 바로 보이지 않게 가려 두고, 누르면 잠깐 보여 준다
+      reveal.textContent = `비밀번호 ${link.pin}`;
+      setTimeout(() => (reveal.textContent = '비밀번호 보기'), 8000);
+      return;
+    }
     if (e.target.closest('[data-off]')) {
       if (!confirm(`‘${link.label}’ 링크를 끌까요? 이 링크로는 더 주고받을 수 없게 돼요.`)) return;
       try {
@@ -244,8 +251,14 @@ function renderDrops() {
         el('div', { class: 'drop-name', title: link.label }, link.label),
         // 좁은 왼쪽 칸에서도 비밀번호가 잘리지 않게 주소와 나머지를 다른 줄에 둔다
         el('div', { class: 'drop-sub', title: link.url ?? link.name }, link.url ? link.url.replace(/^https:\/\//, '') : link.name),
-        el('div', { class: 'muted' }, `비밀번호 ${link.pin} · ${left}${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
+        el('div', { class: 'muted drop-meta' }, `${left}${link.count ? ` · ${link.count}번 받음 (${formatSize(link.bytes)})` : ''}`),
       );
+      const meta = info.lastElementChild;
+      meta.prepend(el('button', { type: 'button', class: 'linkish', 'data-pin': '' }, '비밀번호 보기'), ' · ');
+      if (link.lockCount) {
+        const when = new Date(link.lastLockAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        info.append(el('div', { class: 'drop-warn' }, `비밀번호를 여러 번 틀려 ${link.lockCount}번 막혔어요 (마지막 ${when}). 모르는 사람이면 링크를 끄세요.`));
+      }
       const row = el('li', { class: 'drop-row', 'data-drop': link.id });
       row.append(
         info,
@@ -425,6 +438,9 @@ let reconnectTimer = null;
 
 /** 서버가 보내는 실시간 알림 처리 (집 Wi-Fi의 EventSource와 어디서나(중계) 모드가 같이 쓴다) */
 const EVENT_HANDLERS = {
+  'drop-alert': ({ text }) => {
+    if (state.session?.isHost) toast(text, 'error');
+  },
   drops: (links) => {
     if (!state.session?.isHost) return;
     state.session.drops = links;
@@ -779,6 +795,7 @@ async function onItemClick(e) {
 const relayDownloading = new Set();
 async function relayDownload(item) {
   if (relayDownloading.has(item.id)) return toast(`‘${item.name}’은(는) 받는 중이에요.`);
+  if (item.size > 500 * 1024 * 1024 && !confirm(`‘${item.name}’은(는) ${formatSize(item.size)}예요. 집 밖(중계)에서는 이 기기의 메모리에 모았다가 저장해서, 휴대폰에서는 받다가 멈출 수 있어요. 집 Wi-Fi에서 받으면 더 빠르고 안전해요.\n\n그래도 받을까요?`)) return;
   relayDownloading.add(item.id);
   if (item.size > 500 * 1024 * 1024) toast('큰 파일이라 시간이 걸려요. 집 Wi-Fi에서 받으면 더 빨라요.');
   else toast(`‘${item.name}’ 받는 중…`);
@@ -1299,6 +1316,17 @@ async function waitForRestart(version) {
   toast(`업데이트가 끝나지 않은 것 같아요. 시작 메뉴에서 ${APP_NAME}을(를) 다시 실행해 주세요.`, 'error');
 }
 
+/** 중계 서버가 이 PC보다 예전 버전인지 (버전을 알리지 않는 중계 서버는 1.7.2 이하) */
+function relayIsOlder(relayVersion, mine) {
+  const parse = (v) => (/^\d+\.\d+\.\d+$/.test(String(v)) ? String(v).split('.').map(Number) : null);
+  const me = parse(mine);
+  if (!me) return false; // 개발 중인 버전 등
+  const them = parse(relayVersion);
+  if (!them) return true;
+  for (let i = 0; i < 3; i++) if (them[i] !== me[i]) return them[i] < me[i];
+  return false;
+}
+
 function renderRelayStatus() {
   const relay = state.session.relay;
   const text = !relay
@@ -1308,8 +1336,11 @@ function renderRelayStatus() {
       : relay.state === 'error'
         ? `연결하지 못했어요: ${relay.error}`
         : `${relay.host}에 연결하는 중…`;
-  $('relay-status').textContent = text;
-  $('relay-status').classList.toggle('ok', relay?.state === 'connected');
+  const older = relay?.state === 'connected' && relayIsOlder(relay.relayVersion, state.session.version);
+  $('relay-status').textContent = older
+    ? `${text} · 중계 서버가 예전 버전(${relay.relayVersion || '1.7.2 이하'})이에요. 링크·홈페이지 기능이 제대로 되려면 중계 서버 PC에서 업데이트해 주세요 (보통은 쉬는 동안 스스로 바뀌어요).`
+    : text;
+  $('relay-status').classList.toggle('ok', relay?.state === 'connected' && !older);
 }
 
 const saveSettings = (patch) =>

@@ -13,7 +13,7 @@ const METHODS = new Set(['GET', 'HEAD', 'POST', 'DELETE']);
 const localAgent = new http.Agent({ keepAlive: false });
 const MAX_SESSIONS = 32; // 중계로 동시에 이어 둘 수 있는 기기 수
 // 연결된 다른 PC가 중계로 쓸 수 있는 것: 파일·텍스트 보내기, 연결 해제, 중계 주소 확인 (휴대폰 권한은 주지 않는다)
-const PEER_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
+const PEER_ROUTES = new Set(['POST /api/upload', 'GET /api/upload-check', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
 const PEER_ID = /^[0-9a-f]{16}$/;
 // 링크로 온 사람(쏙이 없는 사람)이 쓸 수 있는 것: 보내기, 받는 PC 이름 확인, 이 PC가 그 사람에게 보낸 것 받기
 const DROP_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'GET /api/drop-info', 'GET /api/drop-items']);
@@ -103,7 +103,7 @@ export function startRelayClient({
       }
       if (msg.t === 'ok') {
         retryMs = 3000;
-        setStatus({ state: 'connected' });
+        setStatus({ state: 'connected', relayVersion: typeof msg.version === 'string' ? msg.version.slice(0, 20) : null });
         ws.send(JSON.stringify({ t: 'link-sync', links: links() }));
       } else if (msg.t === 'error') {
         // 초대 코드가 틀렸거나 막힌 경우: 금방 다시 해도 소용없으니 천천히 다시 시도한다
@@ -368,7 +368,8 @@ export function startRelayClient({
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           waiters.delete(rid);
-          reject(Object.assign(new Error('중계 서버가 응답하지 않아요. 잠시 뒤 다시 시도해 주세요.'), { status: 504 }));
+          const hint = status.relayVersion ? '잠시 뒤 다시 시도해 주세요.' : '중계 서버가 예전 버전이면 링크를 만들 수 없어요. 중계 서버 PC에서 업데이트해 주세요.';
+          reject(Object.assign(new Error(`중계 서버가 응답하지 않아요. ${hint}`), { status: 504 }));
         }, 10_000);
         waiters.set(rid, (reply) => {
           clearTimeout(timer);
@@ -391,7 +392,8 @@ export function startRelayClient({
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pairCodeWaiter = null;
-          reject(Object.assign(new Error('중계 서버가 응답하지 않아요. 잠시 뒤 다시 시도해 주세요.'), { status: 504 }));
+          const hint = status.relayVersion ? '잠시 뒤 다시 시도해 주세요.' : '중계 서버가 예전 버전이면 링크를 만들 수 없어요. 중계 서버 PC에서 업데이트해 주세요.';
+          reject(Object.assign(new Error(`중계 서버가 응답하지 않아요. ${hint}`), { status: 504 }));
         }, 10_000);
         pairCodeWaiter = {
           resolve: (value) => (clearTimeout(timer), resolve(value)),

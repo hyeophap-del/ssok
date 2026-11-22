@@ -5,6 +5,17 @@ const VIRTUAL = /(vEthernet|Virtual|VMware|Hyper-V|WSL|Loopback|Bluetooth|블루
 const WIRELESS = /(Wi-?Fi|WLAN|Wireless|무선)/i;
 const WIRED = /(Ethernet|이더넷|^eth|^en\d)/i;
 
+/** 같은 집·회사 네트워크에서 올 수 있는 주소 (사설·링크 로컬·Tailscale·이 PC). 인터넷 주소는 아니다. */
+export function isLocalNetworkAddress(address) {
+  const a = String(address || '').replace(/^::ffff:/i, '');
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(a)) {
+    const [x, y] = a.split('.').map(Number);
+    return isPrivateIPv4(a) || x === 127 || (x === 169 && y === 254) || (x === 100 && y >= 64 && y <= 127);
+  }
+  const v6 = a.toLowerCase();
+  return v6 === '::1' || /^fe[89ab]/.test(v6) || /^f[cd]/.test(v6);
+}
+
 function isPrivateIPv4(ip) {
   const [a, b] = ip.split('.').map(Number);
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
