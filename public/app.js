@@ -1,6 +1,6 @@
 // {{APP_NAME}} 웹 화면. PC(호스트)와 휴대폰이 같은 페이지를 쓰고, 세션 정보에 따라 화면이 바뀐다.
 // 중계 서버(어디서나)로 열리면 PC와 직접 대신 암호화된 통로(relay.js)로 주고받는다.
-import { RelayClient, fromHex } from './relay.js';
+import { RelayClient, fromHex, RESUME_MIN, RESUME_TRIES, resumeId, resumeWait } from './relay.js';
 
 const $ = (id) => document.getElementById(id);
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -1009,8 +1009,47 @@ async function runQueue() {
   }
 }
 
-function uploadFile(file, target, onProgress) {
-  if (RELAY) return relayUpload(file, onProgress);
+/** 끊겨도 다시 해 볼 만한 오류 (연결 끊김, 일부만 받음, 상대 PC에 잠깐 닿지 않음) */
+const retryable = (err) => Object.assign(err, { retryable: true });
+
+/**
+ * 파일 하나 보내기. 큰 파일은 끊기면 받은 데부터 저절로 이어 보낸다 (휴대폰 → PC, 이 PC → 다른 PC).
+ * 받는 쪽이 예전 버전이면(받은 양을 물을 수 없으면) 처음부터 한 번에 보낸다.
+ */
+async function uploadFile(file, target, onProgress) {
+  const resumable = target ? target.kind !== 'link' : !state.session.isHost;
+  if (file.size < RESUME_MIN || !resumable) return uploadOnce(file, target, onProgress);
+  const uploadId = resumeId(file, target ? `pc:${target.id}` : 'pc');
+  const statusPath = target ? `/api/peers/${target.id}/upload-status` : '/api/upload-status';
+  const query = new URLSearchParams({ uploadId, size: String(file.size), name: file.name || 'file' });
+  let shown = 0; // 화면에 보인 진행 (다시 시도하는 동안에도 0으로 돌아가지 않게)
+  const report = (loaded) => onProgress((shown = loaded));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const status = await request('GET', `${statusPath}?${query}`, { headers: { 'X-Requested-With': APP_ID } });
+      if (status.status !== 200) {
+        if (attempt === 0) return await uploadOnce(file, target, report); // 예전 PC: 이어 보내기 없이
+        throw retryable(new Error('받는 쪽에 닿지 않아요.'));
+      }
+      const offset = Math.min(file.size, Number((await status.json()).received) || 0);
+      transfer.note = attempt ? '이어 보내는 중' : '';
+      await uploadOnce(file, target, (loaded) => report(offset + loaded), { uploadId, size: file.size, offset }, file.slice(offset));
+      transfer.note = '';
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError' || transfer.cancelled) throw new DOMException('취소됨', 'AbortError');
+      const network = err.retryable || err.code || err instanceof TypeError; // TypeError: fetch가 연결하지 못함
+      if (!network || attempt >= RESUME_TRIES) throw err;
+      transfer.note = `연결이 끊겨 다시 이어 보내는 중 (${attempt + 1}/${RESUME_TRIES})`;
+      renderTransfer(shown);
+      await resumeWait(attempt, () => transfer.cancelled);
+    }
+  }
+}
+
+/** 한 번 보내기. extra: 이어 보내기 정보(uploadId·size·offset), body: 보낼 부분 */
+function uploadOnce(file, target, onProgress, extra = null, body = file) {
+  if (RELAY) return relayUpload(file, onProgress, extra, body);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     transfer.xhr = xhr;
@@ -1018,11 +1057,13 @@ function uploadFile(file, target, onProgress) {
     if (file.lastModified) params.set('lastModified', String(file.lastModified));
     // 다른 PC로 보낼 때는 이 PC의 프로그램이 받아서 그대로 그 PC로 흘려보낸다. 링크 상대에게는 이 PC에 두고 그 사람이 받아 간다.
     if (target?.kind === 'link') params.set('to', target.id);
+    for (const [key, value] of Object.entries(extra || {})) params.set(key, String(value));
     xhr.open('POST', `${target && target.kind !== 'link' ? `/api/peers/${target.id}/upload` : '/api/upload'}?${params}`);
     xhr.setRequestHeader('X-Requested-With', APP_ID);
     xhr.upload.addEventListener('progress', (e) => onProgress(e.loaded));
     xhr.addEventListener('load', () => {
       transfer.xhr = null;
+      if (extra && xhr.status === 202) return reject(retryable(new Error('일부만 보냈어요.')));
       if (xhr.status >= 200 && xhr.status < 300) return resolve();
       if (xhr.status === 401) showLocked();
       let message = '보내지 못했어요.';
@@ -1031,33 +1072,37 @@ function uploadFile(file, target, onProgress) {
       } catch {
         // 서버가 JSON이 아닌 응답을 보냈다
       }
-      reject(new Error(message));
+      const err = new Error(message);
+      if (extra && [409, 502, 503, 504].includes(xhr.status)) retryable(err);
+      reject(err);
     });
     xhr.addEventListener('error', () => {
       transfer.xhr = null;
-      reject(new Error('연결이 끊겼어요.'));
+      reject(retryable(new Error('연결이 끊겼어요.')));
     });
     xhr.addEventListener('abort', () => {
       transfer.xhr = null;
       reject(new DOMException('취소됨', 'AbortError'));
     });
-    xhr.send(file);
+    xhr.send(body);
   });
 }
 
 /** 어디서나(중계) 모드에서 파일 보내기: 조각마다 암호화해서 보낸다 */
-async function relayUpload(file, onProgress) {
+async function relayUpload(file, onProgress, extra = null, body = file) {
   const params = new URLSearchParams({ name: file.name || 'file' });
   if (file.lastModified) params.set('lastModified', String(file.lastModified));
+  for (const [key, value] of Object.entries(extra || {})) params.set(key, String(value));
   const controller = new AbortController();
   transfer.abort = controller;
   try {
     const res = await request('POST', `/api/upload?${params}`, {
       headers: { 'x-requested-with': APP_ID, 'content-type': file.type || 'application/octet-stream' },
-      body: file,
+      body,
       onUploadProgress: onProgress,
       signal: controller.signal,
     });
+    if (extra && res.status === 202) throw retryable(new Error('일부만 보냈어요.'));
     if (res.ok) return;
     if (res.status === 401) showLocked('relay');
     let message = '보내지 못했어요.';
@@ -1066,10 +1111,12 @@ async function relayUpload(file, onProgress) {
     } catch {
       // JSON이 아닌 응답
     }
-    throw new Error(message);
+    const err = new Error(message);
+    if (extra && [409, 502, 503, 504].includes(res.status)) retryable(err);
+    throw err;
   } catch (err) {
     if (err.name === 'AbortError') throw err;
-    throw err.code ? new Error('연결이 끊겼어요.') : err;
+    throw err.code ? retryable(new Error('연결이 끊겼어요.')) : err;
   } finally {
     transfer.abort = null;
   }
@@ -1093,6 +1140,7 @@ function renderTransfer(loaded) {
   const speed = elapsed > 0.5 ? bytes / elapsed : 0;
   const parts = [`${formatSize(bytes)} / ${formatSize(transfer.totalBytes)}`];
   if (transfer.currentTarget) parts.unshift(`${transfer.currentTarget.name}에 보내는 중`);
+  if (transfer.note) parts.unshift(transfer.note);
   if (speed > 0) {
     parts.push(`${formatSize(speed)}/s`);
     const remaining = (transfer.totalBytes - bytes) / speed;

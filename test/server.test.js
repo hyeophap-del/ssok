@@ -428,3 +428,41 @@ test('다른 기기에서 받은 실행 파일은 [열기]를 눌러도 실행�
   assert.equal(open.status, 200);
   assert.deepEqual(opened.map(([action]) => action), ['reveal']);
 });
+
+test('보내다 끊긴 파일은 받은 데까지 남겨 두고, 다시 보내면 그 뒤부터 이어 받는다', async () => {
+  const crypto = await import('node:crypto');
+  const content = crypto.randomBytes(3 * 1024 * 1024);
+  const uploadId = 'resume-test-0123456789abcdef';
+  const q = (extra = '') => `name=${encodeURIComponent('이어받기.mp4')}&uploadId=${uploadId}&size=${content.length}${extra}`;
+  assert.deepEqual((await request(remote, { path: `/api/upload-status?${q()}`, headers: cookie })).json, { received: 0 });
+
+  // 1MB쯤 보내다가 연결이 끊긴다
+  await new Promise((resolve) => {
+    const req = http.request({
+      host: '127.0.0.1',
+      port: remote.port,
+      localAddress: remote.localAddress,
+      method: 'POST',
+      path: `/api/upload?${q('&offset=0')}`,
+      headers: { Host: `127.0.0.1:${remote.port}`, ...cookie, ...XRW, 'Content-Length': content.length },
+    });
+    req.on('error', () => resolve());
+    req.write(content.subarray(0, 1024 * 1024), () => setTimeout(() => (req.destroy(), resolve()), 300));
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  const { received } = (await request(remote, { path: `/api/upload-status?${q()}`, headers: cookie })).json;
+  assert.ok(received > 0 && received <= 1024 * 1024, `받아 둔 양: ${received}`);
+  assert.equal(store.list().some((i) => i.name === '이어받기.mp4'), false, '다 받기 전에는 목록에 없다');
+
+  // 시작 위치가 다르면 받은 양을 알려 준다
+  const wrong = await upload(remote, '이어받기.mp4', content.subarray(0, 10), cookie, `&uploadId=${uploadId}&size=${content.length}&offset=0`);
+  assert.equal(wrong.status, 409);
+  assert.equal(JSON.parse(wrong.body.toString()).received, received);
+
+  // 받은 데부터 이어 보낸다
+  const rest = await upload(remote, '이어받기.mp4', content.subarray(received), cookie, `&uploadId=${uploadId}&size=${content.length}&offset=${received}`);
+  assert.equal(rest.status, 201);
+  const item = store.list().find((i) => i.name === '이어받기.mp4');
+  assert.deepEqual(fs.readFileSync(item.path), content, '이어 받은 파일이 원래 파일과 같다');
+  assert.deepEqual((await request(remote, { path: `/api/upload-status?${q()}`, headers: cookie })).json, { received: 0 }, '다 받으면 남겨 둔 조각은 지운다');
+});

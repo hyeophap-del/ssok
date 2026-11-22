@@ -355,6 +355,8 @@ function logEvent(type, payload) {
     console.log(`  [${time}] ${payload} 연결됨 — 이제 서로 파일을 보낼 수 있어요`);
   } else if (type === 'unpaired') {
     console.log(`  [${time}] ${payload} 연결 해제됨`);
+  } else if (type === 'upload-paused') {
+    console.log(`  [${time}] 받다가 끊김 (다시 보내면 이어 받아요): ${payload}`);
   } else if (type === 'upload-cancelled') {
     console.log(`  [${time}] 전송 취소됨: ${payload}`);
   } else if (type === 'drop-lock') {

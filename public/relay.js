@@ -81,6 +81,8 @@ function frame(type, id, payload) {
 
 const textOf = (data) => (typeof data === 'string' ? data : null);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 연결이 끊겼다는 오류 (code로 알아보고 다시 시도한다) */
+const closedError = () => Object.assign(new Error('연결이 끊겼어요'), { code: 'CLOSED' });
 
 /**
  * 웹소켓 위의 암호화된 통로. role은 'phone' 또는 'pc'.
@@ -202,7 +204,7 @@ export class SecureSocket {
   /** 암호화해서 보낸다. 보내는 순서와 번호를 지키려고 차례대로 처리한다. */
   send(type, id, payload) {
     const run = async () => {
-      if (this.closed) throw new Error('연결이 끊겼어요');
+      if (this.closed) throw closedError();
       const key = this.role === 'pc' ? this.keys.pcToPhone : this.keys.phoneToPc;
       const counter = this.sendCounter++;
       const data = await subtle().encrypt({ name: 'AES-GCM', iv: iv(counter) }, key, frame(type, id, payload));
@@ -273,7 +275,7 @@ export class RelayClient {
     const ws = new WebSocketImpl(url);
     await new Promise((resolve, reject) => {
       ws.onopen = resolve;
-      ws.onerror = () => reject(new Error('중계 서버에 연결하지 못했어요'));
+      ws.onerror = () => reject(Object.assign(new Error('중계 서버에 연결하지 못했어요'), { code: 'CONNECT' }));
       ws.onclose = (e) => reject(Object.assign(new Error('중계 서버에 연결하지 못했어요'), { code: e.code === 4004 ? 'PC_OFFLINE' : 'CLOSED' }));
     });
     const client = new RelayClient();
@@ -282,9 +284,9 @@ export class RelayClient {
       secret,
       onFrame: (type, id, payload) => client.onFrame(type, id, payload),
       onClose: (err) => {
-        for (const stream of client.streams.values()) stream.fail(err || new Error('연결이 끊겼어요'));
+        for (const stream of client.streams.values()) stream.fail(err || closedError());
         client.streams.clear();
-        for (const raw of client.raws.values()) raw.onClose?.(err || new Error('연결이 끊겼어요'));
+        for (const raw of client.raws.values()) raw.onClose?.(err || closedError());
         client.raws.clear();
         client.closed = true;
         onClose?.(err);
@@ -307,7 +309,7 @@ export class RelayClient {
    * @returns {{ write(bytes: Uint8Array): Promise<void>, end(): void, abort(): void }}
    */
   openRaw({ onData, onEnd, onClose }) {
-    if (this.closed) throw new Error('연결이 끊겼어요');
+    if (this.closed) throw closedError();
     const id = this.nextId;
     this.nextId += 2;
     this.raws.set(id, { onData, onEnd, onClose });
@@ -357,7 +359,7 @@ export class RelayClient {
    * @param {AbortSignal} [options.signal]
    */
   async request(method, path, { headers = {}, body = null, onUploadProgress, onChunk, signal } = {}) {
-    if (this.closed) throw new Error('연결이 끊겼어요');
+    if (this.closed) throw closedError();
     if (signal?.aborted) throw new DOMException('취소됨', 'AbortError'); // 다시 연결하는 사이에 취소를 눌렀다
     const id = this.nextId;
     this.nextId += 2;
@@ -432,6 +434,7 @@ function createStream(onChunk) {
     resolveHead = resolve;
     rejectHead = reject;
   });
+  response.catch(() => {}); // 보내는 중에 끊기면 아직 아무도 기다리지 않는다: 처리되지 않은 오류로 남지 않게 (기다리는 쪽은 그대로 오류를 받는다)
   const body = async () => {
     await ended;
     const total = chunks.reduce((n, c) => n + c.length, 0);
@@ -473,4 +476,47 @@ function createStream(onChunk) {
       rejectEnd(err);
     },
   };
+}
+
+// ---- 이어 보내기 (휴대폰 화면·링크 화면이 함께 쓴다) ----
+/** 이 크기보다 큰 파일은 보내다 끊겨도 받은 데부터 이어 보낸다 */
+export const RESUME_MIN = 4 * 1024 * 1024;
+/** 끊겼을 때 다시 해 보는 횟수 */
+export const RESUME_TRIES = 6;
+
+/**
+ * 이어 보내기 번호: 이 기기에서 같은 곳에 같은 파일을 다시 보내면 같은 번호가 나와서, 화면을 새로 열어도 이어 보낸다.
+ * 기기마다 다른 비밀 값을 섞어 다른 기기와 겹치거나 짐작되지 않게 한다. (집 Wi-Fi의 http 화면에서는 crypto.subtle을 못 써서 간단한 해시)
+ */
+export function resumeId(file, scope) {
+  let salt = '';
+  try {
+    salt = localStorage.getItem('ssok.uploadSalt') || '';
+    if (!/^[0-9a-f]{32}$/.test(salt)) {
+      salt = toHex(randomBytes(16));
+      localStorage.setItem('ssok.uploadSalt', salt);
+    }
+  } catch {
+    salt = resumeId.sessionSalt ??= toHex(randomBytes(16));
+  }
+  const text = `${scope}|${file.name}|${file.size}|${file.lastModified}`;
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return `${salt}-${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/** 다시 해 보기 전에 기다린다 (1, 2, 4, 8초… 15초까지). 취소되면 AbortError */
+export async function resumeWait(attempt, isCancelled) {
+  const until = Date.now() + Math.min(15_000, 1000 * 2 ** attempt);
+  while (Date.now() < until) {
+    if (isCancelled?.()) throw new DOMException('취소됨', 'AbortError');
+    await sleep(200);
+  }
 }

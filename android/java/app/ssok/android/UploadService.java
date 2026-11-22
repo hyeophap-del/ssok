@@ -50,6 +50,44 @@ public class UploadService extends Service {
     private static final String CHANNEL_RESULT = "result";
     private static final int PROGRESS_ID = 1;
     private static final long PREFLIGHT_BYTES = 1024 * 1024; // 이보다 큰 파일은 보내기 전에 받을 수 있는지 묻는다
+    private static final long RESUME_MIN = 4 * 1024 * 1024; // 이보다 큰 파일은 끊겨도 받은 데부터 이어 보낸다
+    private static final int RESUME_TRIES = 6;
+
+    /** 이어 보내기 정보: 같은 파일을 다시 보내면 같은 번호 → PC가 받아 둔 데부터 이어 받는다 */
+    private static final class Resume {
+        final String id;
+        final long size;
+        final String name;
+
+        Resume(String id, long size, String name) {
+            this.id = id;
+            this.size = size;
+            this.name = name;
+        }
+
+        String statusPath() throws IOException {
+            return "/api/upload-status?uploadId=" + id + "&size=" + size + "&name=" + URLEncoder.encode(name, "UTF-8");
+        }
+
+        String params(long offset) {
+            return "&uploadId=" + id + "&size=" + size + "&offset=" + offset;
+        }
+    }
+
+    /** 앞부분을 건너뛴다 (이어 보낼 때). skip이 덜 건너뛰면 읽어서 버린다. */
+    private static void skipFully(InputStream in, long count) throws IOException {
+        long left = count;
+        byte[] buf = null;
+        while (left > 0) {
+            long n = in.skip(left);
+            if (n <= 0) {
+                if (buf == null) buf = new byte[64 * 1024];
+                n = in.read(buf, 0, (int) Math.min(buf.length, left));
+                if (n < 0) throw new IOException("파일이 줄어들었어요");
+            }
+            left -= n;
+        }
+    }
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private NotificationManager notifications;
@@ -179,7 +217,7 @@ public class UploadService extends Service {
             check(r.status, r.json);
             return null;
         }, () -> {
-            relayRequest(pc, "/api/text", "application/json", body.length, () -> new java.io.ByteArrayInputStream(body), null);
+            relayRequest(pc, "/api/text", "application/json", body.length, () -> new java.io.ByteArrayInputStream(body), null, null);
             return null;
         });
     }
@@ -219,15 +257,31 @@ public class UploadService extends Service {
         final long length = size;
         final String fileName = name;
         Opener opener = () -> source != null ? new FileInputStream(source) : resolver.openInputStream(uri);
+        // 큰 파일: 이 앱의 번호를 섞어 다른 기기와 겹치지 않게
+        final Resume resume = length >= RESUME_MIN
+                ? new Resume(Net.sha256Hex(Store.appId(this) + "|" + uri + "|" + length + "|" + lastModified).substring(0, 32), length, fileName)
+                : null;
         try {
-            deliver(pc, () -> {
-                upload(pc, fileName, length, lastModified, index, total, opener);
-                return null;
-            }, () -> {
-                String path = "/api/upload?name=" + URLEncoder.encode(fileName, "UTF-8") + (lastModified > 0 ? "&lastModified=" + lastModified : "");
-                relayRequest(pc, path, "application/octet-stream", length, opener, progressFor(pc, fileName, length, index, total, true));
-                return null;
-            });
+            for (int attempt = 0; ; attempt++) {
+                try {
+                    deliver(pc, () -> {
+                        upload(pc, fileName, length, lastModified, index, total, opener, resume);
+                        return null;
+                    }, () -> {
+                        String path = "/api/upload?name=" + URLEncoder.encode(fileName, "UTF-8") + (lastModified > 0 ? "&lastModified=" + lastModified : "");
+                        relayRequest(pc, path, "application/octet-stream", length, opener, progressFor(pc, fileName, length, index, total, true), resume);
+                        return null;
+                    });
+                    break;
+                } catch (UnpairedException | RejectedException e) {
+                    throw e;
+                } catch (Exception e) {
+                    if (resume == null || attempt >= RESUME_TRIES - 1 || timedOut) throw e;
+                    notifications.notify(PROGRESS_ID, progress((total > 1 ? index + "/" + total + " · " : "") + fileName, 0, 0, true,
+                            "연결이 끊겨 다시 이어 보내는 중 (" + (attempt + 1) + "/" + (RESUME_TRIES - 1) + ")"));
+                    Thread.sleep(Math.min(15_000L, 2000L << attempt));
+                }
+            }
         } finally {
             if (temp != null) temp.delete();
         }
@@ -291,7 +345,7 @@ public class UploadService extends Service {
     }
 
     /** 중계 서버를 거쳐 PC의 쏙에 보낸다. 통로는 한 번 열어 두고 이번에 보내는 파일들에 다시 쓴다. */
-    private void relayRequest(Store.Pc pc, String path, String contentType, long length, Opener opener, Progress progress) throws Exception {
+    private void relayRequest(Store.Pc pc, String path, String contentType, long length, Opener opener, Progress progress, Resume resume) throws Exception {
         notifications.notify(PROGRESS_ID, progress(pc.name + "(으)로 보내는 중", 0, 0, true, "집 밖이라 중계 서버를 거쳐요"));
         Map<String, String> headers = new HashMap<>();
         headers.put("content-type", contentType);
@@ -316,14 +370,30 @@ public class UploadService extends Service {
                     check(pre.status, pj);
                 }
             }
+            long offset = 0;
+            boolean resuming = false;
+            if (resume != null) {
+                Relay.Response st = relay.request("GET", resume.statusPath(), headers, null, 0, null);
+                if (st.status == 200) {
+                    try {
+                        offset = Math.min(length, Math.max(0, new JSONObject(st.body == null ? "" : st.body).optLong("received", 0)));
+                        resuming = true;
+                    } catch (Exception e) {
+                        offset = 0;
+                    }
+                }
+            }
+            final long start = offset;
             Relay.Response r;
             try (InputStream in = opener.open()) {
                 if (in == null) throw new RejectedException("파일을 읽을 수 없어요.");
-                r = relay.request("POST", path, headers, in, length, done -> {
+                skipFully(in, start);
+                r = relay.request("POST", resuming ? path + resume.params(start) : path, headers, in, length - start, sent -> {
                     dog.kick();
-                    if (progress != null) progress.update(done);
+                    if (progress != null) progress.update(start + sent);
                 });
             }
+            if (resuming && (r.status == 202 || r.status == 409)) throw new IOException("일부만 보냈어요");
             JSONObject json;
             try {
                 json = new JSONObject(r.body == null ? "" : r.body);
@@ -335,7 +405,7 @@ public class UploadService extends Service {
             closeRelay();
             if (reused && "CLOSED".equals(e.code)) {
                 dog.close();
-                relayRequest(pc, path, contentType, length, opener, progress); // 오래 쉬어 끊긴 통로: 새로 열어 한 번 더
+                relayRequest(pc, path, contentType, length, opener, progress, resume); // 오래 쉬어 끊긴 통로: 새로 열어 한 번 더
                 return;
             }
             // PC에서 연결을 해제했거나 키가 바뀐 것 같다. 다만 이 표시는 중계 서버가 보낸 것이라 연결을 지우지는 않는다.
@@ -348,7 +418,7 @@ public class UploadService extends Service {
             closeRelay(); // 끊긴 통로는 버린다 (다음 파일은 새로 연다)
             if (reused) {
                 dog.close();
-                relayRequest(pc, path, contentType, length, opener, progress); // 오래 쉬어 끊긴 통로: 새로 열어 한 번 더
+                relayRequest(pc, path, contentType, length, opener, progress, resume); // 오래 쉬어 끊긴 통로: 새로 열어 한 번 더
                 return;
             }
             throw e;
@@ -427,16 +497,26 @@ public class UploadService extends Service {
         if (r.status == 401 || r.status == 507) check(r.status, r.json);
     }
 
-    private void upload(Store.Pc pc, String name, long size, long lastModified, int index, int total, Opener opener) throws Exception {
+    private void upload(Store.Pc pc, String name, long size, long lastModified, int index, int total, Opener opener, Resume resume) throws Exception {
         preflight(pc, size);
-        String path = "/api/upload?name=" + URLEncoder.encode(name, "UTF-8") + (lastModified > 0 ? "&lastModified=" + lastModified : "");
+        long offset = 0;
+        boolean resuming = false;
+        if (resume != null) {
+            Net.Result st = Net.json(pc.host, pc.port, "GET", resume.statusPath(), null, pc.key, pc.fingerprint, 8000);
+            if (st.status == 200) {
+                resuming = true;
+                offset = Math.min(size, Math.max(0, st.json.optLong("received", 0)));
+            }
+        }
+        final long start = offset;
+        String path = "/api/upload?name=" + URLEncoder.encode(name, "UTF-8") + (lastModified > 0 ? "&lastModified=" + lastModified : "") + (resuming ? resume.params(start) : "");
         HttpsURLConnection c = Net.open(pc.host, pc.port, path, pc.fingerprint, null);
         try {
             c.setConnectTimeout(5000);
             c.setReadTimeout(60000);
             c.setRequestMethod("POST");
             c.setDoOutput(true);
-            c.setFixedLengthStreamingMode(size);
+            c.setFixedLengthStreamingMode(size - start);
             c.setRequestProperty("Authorization", "Bearer " + pc.key);
             c.setRequestProperty("Content-Type", "application/octet-stream");
             String label = (total > 1 ? index + "/" + total + " · " : "") + name;
@@ -444,8 +524,10 @@ public class UploadService extends Service {
             Watchdog dog = new Watchdog(60_000, c::disconnect);
             try (InputStream in = opener.open(); OutputStream out = c.getOutputStream()) {
                 if (in == null) throw new RejectedException(name + ": 파일을 읽을 수 없어요.");
+                skipFully(in, start);
                 long[] last = {0};
-                copy(in, out, done -> {
+                copy(in, out, sent -> {
+                    long done = start + sent;
                     dog.kick();
                     long now = System.currentTimeMillis();
                     if (now - last[0] < 500) return;
@@ -464,6 +546,8 @@ public class UploadService extends Service {
             } catch (Exception e) {
                 json = new JSONObject();
             }
+            // 이어 보내기: 일부만 받았거나 위치가 달랐다 → 끊긴 것처럼 다시 (받은 양을 다시 묻고 이어 보낸다)
+            if (resuming && (c.getResponseCode() == 202 || c.getResponseCode() == 409)) throw new IOException("일부만 보냈어요");
             check(c.getResponseCode(), json);
         } finally {
             c.disconnect();

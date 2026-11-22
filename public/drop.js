@@ -1,7 +1,7 @@
 // 링크 화면 (https://<중계 서버>/<링크 이름>, 예: ssok.example.com/minsu):
 // 쏙이 없는 사람이 비밀번호를 넣고 그 PC로 보내거나, 그 PC가 보내 준 것을 받아 간다.
 // 중계 서버를 거치지만, 열쇠는 이 브라우저와 그 PC가 그 자리에서 만들고(ECDH) 비밀번호는 암호화된 통로 안에서만 보낸다.
-import { RelayClient } from './relay.js';
+import { RelayClient, RESUME_MIN, RESUME_TRIES, resumeId, resumeWait } from './relay.js';
 
 const APP_ID = '{{APP_ID}}';
 const $ = (id) => document.getElementById(id);
@@ -295,6 +295,45 @@ function addSent(label, iconId) {
   $('sent-card').hidden = false;
 }
 
+/**
+ * 파일 하나 보내기. 큰 파일은 연결이 끊기면 받은 데부터 저절로 이어 보낸다 (PC가 예전 버전이면 처음부터 한 번에).
+ */
+async function sendOne(file, render) {
+  const resumable = file.size >= RESUME_MIN;
+  const uploadId = resumable ? resumeId(file, `link:${linkName}`) : null;
+  for (let attempt = 0; ; attempt++) {
+    current.abort = new AbortController();
+    try {
+      const client = await connect();
+      let offset = 0;
+      if (resumable) {
+        const query = new URLSearchParams({ uploadId, size: String(file.size), name: file.name || 'file' });
+        const status = await client.request('GET', `/api/upload-status?${query}`, { headers: { 'x-requested-with': APP_ID }, signal: current.abort.signal });
+        if (status.status === 200) offset = Math.min(file.size, Number((await status.json()).received) || 0);
+        else if (await handleDenied(status)) throw new Error('이 링크로는 더 보낼 수 없어요.');
+      }
+      const params = new URLSearchParams({ name: file.name || 'file' });
+      if (file.lastModified) params.set('lastModified', String(file.lastModified));
+      if (resumable) for (const [key, value] of Object.entries({ uploadId, size: file.size, offset })) params.set(key, String(value));
+      const res = await client.request('POST', `/api/upload?${params}`, {
+        headers: { 'x-requested-with': APP_ID, 'content-type': file.type || 'application/octet-stream' },
+        body: offset ? file.slice(offset) : file,
+        onUploadProgress: (loaded) => render(offset + loaded),
+        signal: current.abort.signal,
+      });
+      if (res.status === 202 || res.status === 409) throw Object.assign(new Error('일부만 보냈어요.'), { retry: true });
+      if (!res.ok) throw new Error(await errorOf(res));
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      const network = err.retry || err.code;
+      if (!resumable || !network || attempt >= RESUME_TRIES) throw err;
+      $('transfer-title').textContent = `연결이 끊겨 다시 이어 보내는 중 (${attempt + 1}/${RESUME_TRIES})`;
+      await resumeWait(attempt, () => current?.abort?.signal.aborted);
+    }
+  }
+}
+
 /** 파일을 하나씩 보낸다 (진행률 표시, 취소 가능) */
 async function sendFiles(files) {
   const list = [...files];
@@ -313,17 +352,7 @@ async function sendFiles(files) {
         $('transfer-detail').textContent = `${file.name} · ${formatSize(done + loaded)} / ${formatSize(total)}`;
       };
       render(0);
-      current.abort = new AbortController();
-      const params = new URLSearchParams({ name: file.name || 'file' });
-      if (file.lastModified) params.set('lastModified', String(file.lastModified));
-      const client = await connect();
-      const res = await client.request('POST', `/api/upload?${params}`, {
-        headers: { 'x-requested-with': APP_ID, 'content-type': file.type || 'application/octet-stream' },
-        body: file,
-        onUploadProgress: render,
-        signal: current.abort.signal,
-      });
-      if (!res.ok) throw new Error(await errorOf(res));
+      await sendOne(file, render);
       done += file.size;
       addSent(file.name, 'i-check');
     }

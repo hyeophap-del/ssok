@@ -264,6 +264,27 @@ test('연결된 PC로 보낸 파일·텍스트는 상대 PC의 받은 폴더와 
   assert.deepEqual(fs.readdirSync(pcs.B.receivedDir).filter((n) => n.endsWith(`.${APP_ID}-part`)), []);
 });
 
+test('다른 PC로 보내다 끊겨도 받은 데부터 이어 보낸다 (이 PC가 받은 양을 물어 전해 준다)', async () => {
+  const content = Buffer.from('0123456789'.repeat(1000));
+  const uploadId = 'peer-resume-0123456789abcdef';
+  const q = `uploadId=${uploadId}&size=${content.length}&name=${encodeURIComponent('이어서.bin')}`;
+  const status = () => request(pcs.A, { path: `/api/peers/${IDS.B}/upload-status?${q}`, headers: XRW });
+  assert.deepEqual((await status()).json, { received: 0 });
+
+  // 앞쪽 절반만 보냈다 (끊긴 것과 같다): 상대 PC는 받은 양을 알려 주고 아직 목록에 넣지 않는다
+  const half = await postBytes(pcs.A, `/api/peers/${IDS.B}/upload?name=${encodeURIComponent('이어서.bin')}&uploadId=${uploadId}&size=${content.length}&offset=0`, content.subarray(0, 4000));
+  assert.equal(half.status, 202);
+  assert.equal(half.json.received, 4000);
+  assert.deepEqual((await status()).json, { received: 4000 });
+  assert.equal(pcs.B.store.list().some((i) => i.name === '이어서.bin'), false);
+
+  // 나머지를 이어 보낸다
+  const rest = await postBytes(pcs.A, `/api/peers/${IDS.B}/upload?name=${encodeURIComponent('이어서.bin')}&uploadId=${uploadId}&size=${content.length}&offset=4000`, content.subarray(4000));
+  assert.equal(rest.status, 201);
+  assert.deepEqual(fs.readFileSync(path.join(pcs.B.receivedDir, '이어서.bin')), content);
+});
+
+
 test('휴대폰이나 연결된 PC는 PC 화면 전용 기능을 쓸 수 없고, 키는 암호화된 연결로만 받는다', async () => {
   const phone = { Cookie: `${APP_ID}=token-A` };
   assert.equal((await request(pcs.A, { path: '/api/peers', headers: phone, from: '127.0.0.2' })).status, 403);

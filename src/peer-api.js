@@ -325,6 +325,10 @@ export function createPeerApi({
       sendEmpty(res);
       return true;
     }
+    if ((m = /^\/api\/peers\/([0-9a-f]{16})\/upload-status$/.exec(pathname)) && method === 'GET') {
+      await peerUploadStatus(res, url, m[1]);
+      return true;
+    }
     if ((m = /^\/api\/peers\/([0-9a-f]{16})\/(upload|text)$/.exec(pathname)) && method === 'POST') {
       await sendToPeer(req, res, url, m[1], m[2]);
       return true;
@@ -505,8 +509,7 @@ export function createPeerApi({
     let targetPath = '/api/text';
     if (kind === 'upload') {
       const params = new URLSearchParams({ name: url.searchParams.get('name') ?? '' });
-      const lastModified = url.searchParams.get('lastModified');
-      if (lastModified) params.set('lastModified', lastModified);
+      for (const key of ['lastModified', 'uploadId', 'size', 'offset']) if (url.searchParams.has(key)) params.set(key, url.searchParams.get(key));
       targetPath = `/api/upload?${params}`;
     }
 
@@ -551,6 +554,10 @@ export function createPeerApi({
       changed();
       return sendJson(res, 409, { error: `${peer.name}에서 연결이 해제됐어요. 다시 연결해 주세요.` });
     }
+    // 이어 보내기: 일부만 받았거나(202) 시작 위치가 달랐으면(409) 받은 양을 그대로 알려 준다
+    if ((result.status === 202 || result.status === 409) && Number.isSafeInteger(result.json?.received)) {
+      return sendJson(res, result.status, { received: result.json.received, error: result.json.error });
+    }
     if (result.status < 200 || result.status >= 300) {
       return sendJson(res, result.status, { error: `${peer.name}: ${result.json?.error || '보내지 못했어요.'}` });
     }
@@ -558,6 +565,22 @@ export function createPeerApi({
     if (seen) changed();
     log('peer-sent', { to: viaRelay ? `${peer.name} (어디서나)` : peer.name, item: result.json });
     return sendJson(res, 201, { ok: true, to: peer.name, via: viaRelay ? 'relay' : 'lan' });
+  }
+
+  /** 이어 보내기: 상대 PC가 그 파일을 얼마나 받아 두었는지 묻는다 (예전 버전이면 404 → 화면은 처음부터 보낸다) */
+  async function peerUploadStatus(res, url, id) {
+    const peer = book.getPaired(id);
+    if (peer?.kind !== 'pc') return sendJson(res, 404, { error: '연결된 PC가 아니에요.' });
+    const params = new URLSearchParams();
+    for (const key of ['uploadId', 'size', 'name']) if (url.searchParams.has(key)) params.set(key, url.searchParams.get(key));
+    const statusPath = `/api/upload-status?${params}`;
+    let result = null;
+    if (peer.address && (book.isOnline(peer.id) || !peer.relay)) {
+      result = await requestJson(peer, { path: statusPath, headers: peerHeaders(peer), pin: peer.cert, timeout: 5000 }).catch(() => null);
+    }
+    if (!result && peer.relay) result = await relayRequest(peer, 'GET', statusPath, { 'x-requested-with': APP_ID }).catch(() => null);
+    if (result?.status === 200 && Number.isSafeInteger(result.json?.received)) return sendJson(res, 200, { received: result.json.received });
+    return sendJson(res, 404, { error: '이어 보내기를 쓸 수 없어요.' });
   }
 
   /** 같은 네트워크에서 상대 PC에 바로 보낸다 (HTTPS, 저장해 둔 인증서로 고정) */

@@ -186,10 +186,10 @@ export class DropBook {
   }
 
   /** 이 링크로 받은 양을 센다 (PC 화면에 보여 줌) */
-  record(id, bytes) {
+  record(id, bytes, newFile = true) {
     const link = this.active(id);
     if (!link) return;
-    link.count += 1;
+    if (newFile) link.count += 1;
     link.bytes += Math.max(0, Number(bytes) || 0);
     this.saveSoon();
   }

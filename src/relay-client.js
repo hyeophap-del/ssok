@@ -13,10 +13,10 @@ const METHODS = new Set(['GET', 'HEAD', 'POST', 'DELETE']);
 const localAgent = new http.Agent({ keepAlive: false });
 const MAX_SESSIONS = 32; // 중계로 동시에 이어 둘 수 있는 기기 수
 // 연결된 다른 PC가 중계로 쓸 수 있는 것: 파일·텍스트 보내기, 연결 해제, 중계 주소 확인 (휴대폰 권한은 주지 않는다)
-const PEER_ROUTES = new Set(['POST /api/upload', 'GET /api/upload-check', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
+const PEER_ROUTES = new Set(['POST /api/upload', 'GET /api/upload-check', 'GET /api/upload-status', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
 const PEER_ID = /^[0-9a-f]{16}$/;
 // 링크로 온 사람(쏙이 없는 사람)이 쓸 수 있는 것: 보내기, 받는 PC 이름 확인, 이 PC가 그 사람에게 보낸 것 받기
-const DROP_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'GET /api/drop-info', 'GET /api/drop-items']);
+const DROP_ROUTES = new Set(['POST /api/upload', 'GET /api/upload-status', 'POST /api/text', 'GET /api/drop-info', 'GET /api/drop-items']);
 const DROP_FILE = /^\/api\/drop-files\/[0-9a-f]{16}$/;
 const DROP_KID = /^d:([0-9a-f]{16})$/;
 // 아이폰 단축어 (중계 서버가 단축어 대신 연다): 보내기만

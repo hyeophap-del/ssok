@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { sanitizeFilename, moveIntoPlace, mimeOf, isInlineSafe, contentDisposition, isRunnable, markFromInternet } from './files.js';
 import { isAllowedHost, isOwnAddress } from './net.js';
@@ -24,6 +25,11 @@ const LEGACY_COOKIE = 'gf'; // 예전 이름(Galaxy File) 때 휴대폰에 저�
 const COOKIE_MAX_AGE = 400 * 24 * 60 * 60; // 브라우저가 허용하는 최대치(400일)
 const MAX_TEXT = 100_000;
 const PART_SUFFIX = `.${APP_ID}-part`;
+// 이어 보내기: 받다 끊긴 파일을 받은 파일 폴더 안의 숨긴 폴더에 남겨 두었다가, 같은 파일을 다시 보내면 이어 받는다
+const PARTIAL_DIR = `.${APP_ID}-partial`;
+const PARTIAL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_PARTIALS = 20;
+const UPLOAD_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const PART_FILE = new RegExp(`^\\.[0-9a-f]{16}\\.${APP_ID}-part$`);
 
 const PAGE_CSP = [
@@ -359,8 +365,9 @@ export function createApp(options) {
         if (store.get(dropFile[1])?.to !== ctx.drop.id) return sendJson(res, 404, { error: '항목을 찾을 수 없어요.' });
         return download(req, res, url, dropFile[1]);
       }
+      if (pathname === '/api/upload-status' && method === 'GET') return uploadStatus(res, url, ctx);
       if (pathname === '/api/upload' && method === 'POST') {
-        drops.record(ctx.drop.id, Number(req.headers['content-length']) || 0);
+        drops.record(ctx.drop.id, Number(req.headers['content-length']) || 0, Number(url.searchParams.get('offset') || 0) === 0);
         broadcastHost('drops', dropList());
         return upload(req, res, url, ctx);
       }
@@ -383,6 +390,7 @@ export function createApp(options) {
     if (peers && (await peers.handle(req, res, url, ctx))) return;
     // 연결된 다른 PC·안드로이드 앱은 보내기 통로일 뿐: 이 PC의 받은 목록을 보거나 지우지 못한다
     if (ctx.peer) {
+      if (pathname === '/api/upload-status' && method === 'GET') return uploadStatus(res, url, ctx);
       if (pathname === '/api/upload-check' && method === 'GET') return uploadCheck(res, url);
       if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
       if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
@@ -393,6 +401,7 @@ export function createApp(options) {
     if (pathname === '/api/items' && method === 'GET') return sendJson(res, 200, { items: store.list().filter(visibleTo(ctx)).map(publicItem) });
     if (pathname === '/api/events' && method === 'GET') return events(req, res, ctx);
     if (pathname === '/api/upload-check' && method === 'GET') return uploadCheck(res, url);
+    if (pathname === '/api/upload-status' && method === 'GET') return uploadStatus(res, url, ctx);
     if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
     if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
     if (pathname === '/api/settings' && (method === 'GET' || method === 'POST')) return settingsApi(req, res, ctx);
@@ -672,6 +681,167 @@ export function createApp(options) {
     log('add', item);
   }
 
+  // ---- 이어 보내기 ----
+  // 보내는 쪽이 파일마다 정한 번호(uploadId)로, 받다 끊긴 것을 이어 받는다.
+  //   GET  /api/upload-status?uploadId=&name=&size=  → { received }  (받아 둔 양. 없거나 다른 파일이면 0)
+  //   POST /api/upload?name=&uploadId=&size=<전체>&offset=<시작>  본문 = offset부터 끝까지(또는 일부)
+  //        → 201 다 받음 / 202 { received } 일부만 / 409 { received } 시작 위치가 다름
+  // 보내는 쪽마다(연결된 PC·링크·휴대폰) 따로 둔다: 다른 기기가 번호를 알아도 남의 파일에 이어 쓰지 못하게.
+  const resuming = new Set();
+  const partialDir = () => path.join(receivedDir, PARTIAL_DIR);
+  function resumeKey(ctx, uploadId) {
+    const who = ctx.peer ? `p:${ctx.peer.id}` : ctx.drop ? `d:${ctx.drop.id}` : ctx.shortcut ? 'shortcut' : 'phone';
+    return crypto.createHash('sha256').update(`${who}\n${uploadId}`).digest('hex').slice(0, 32);
+  }
+  async function readPartial(key) {
+    try {
+      const meta = JSON.parse(await fsp.readFile(path.join(partialDir(), `${key}.json`), 'utf8'));
+      const { size } = await fsp.stat(path.join(partialDir(), `${key}.part`)).catch(() => ({ size: 0 }));
+      return { meta, size };
+    } catch {
+      return null;
+    }
+  }
+  async function dropPartial(key) {
+    for (const ext of ['part', 'json']) await fsp.rm(path.join(partialDir(), `${key}.${ext}`), { force: true }).catch(() => {});
+  }
+  let partialDirReady = false;
+  async function ensurePartialDir() {
+    await fsp.mkdir(partialDir(), { recursive: true });
+    if (partialDirReady || process.platform !== 'win32') return;
+    partialDirReady = true;
+    // 받은 파일 폴더에서 보이지 않게 숨긴다
+    try {
+      spawn('attrib', ['+h', partialDir()], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
+    } catch {
+      // 숨기지 못해도 쓰는 데는 문제없다
+    }
+  }
+  /** 오래된(24시간) 것과 너무 많은 것을 지운다 */
+  async function prunePartials({ keep = MAX_PARTIALS } = {}) {
+    let names;
+    try {
+      names = await fsp.readdir(partialDir());
+    } catch {
+      return;
+    }
+    const metas = [];
+    for (const name of names.filter((n) => n.endsWith('.json'))) {
+      const key = name.slice(0, -5);
+      const p = await readPartial(key);
+      metas.push({ key, updatedAt: p?.meta?.updatedAt ?? 0 });
+    }
+    metas.sort((a, b) => b.updatedAt - a.updatedAt);
+    for (const [i, m] of metas.entries()) if (i >= keep || Date.now() - m.updatedAt > PARTIAL_MAX_AGE_MS) await dropPartial(m.key);
+    // 설명 파일 없이 남은 조각 (갑자기 꺼진 경우)
+    for (const name of names.filter((n) => n.endsWith('.part'))) {
+      if (!metas.some((m) => `${m.key}.part` === name)) {
+        const stat = await fsp.stat(path.join(partialDir(), name)).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > PARTIAL_MAX_AGE_MS) await fsp.rm(path.join(partialDir(), name), { force: true }).catch(() => {});
+      }
+    }
+  }
+
+  async function uploadStatus(res, url, ctx) {
+    const uploadId = url.searchParams.get('uploadId') ?? '';
+    const size = Number(url.searchParams.get('size'));
+    const name = sanitizeFilename(url.searchParams.get('name') ?? '');
+    if (!UPLOAD_ID.test(uploadId) || !Number.isSafeInteger(size) || size < 0) return sendJson(res, 400, { error: '잘못된 요청이에요.' });
+    const key = resumeKey(ctx, uploadId);
+    const p = await readPartial(key);
+    if (!p || p.meta.size !== size || p.meta.name !== name) {
+      if (p && !resuming.has(key)) await dropPartial(key); // 같은 번호로 다른 파일: 예전 것은 버린다
+      return sendJson(res, 200, { received: 0 });
+    }
+    return sendJson(res, 200, { received: Math.min(p.size, size) });
+  }
+
+  async function resumableUpload(req, res, url, ctx, { name, lastModified, part, target }) {
+    const uploadId = url.searchParams.get('uploadId') ?? '';
+    const total = Number(url.searchParams.get('size'));
+    const offset = Number(url.searchParams.get('offset') ?? 0);
+    if (!UPLOAD_ID.test(uploadId) || !Number.isSafeInteger(total) || !Number.isSafeInteger(offset) || offset < 0 || offset + part > total) {
+      rejectBody(req, res);
+      return sendJson(res, 400, { error: '이어 보내기 요청이 맞지 않아요.' });
+    }
+    const key = resumeKey(ctx, uploadId);
+    if (resuming.has(key)) {
+      rejectBody(req, res);
+      return sendJson(res, 409, { error: '같은 파일을 받는 중이에요. 잠시 뒤 다시 해 주세요.' });
+    }
+    resuming.add(key);
+    try {
+      await ensurePartialDir();
+      const partFile = path.join(partialDir(), `${key}.part`);
+      const metaFile = path.join(partialDir(), `${key}.json`);
+      let p = await readPartial(key);
+      if (p && (p.meta.size !== total || p.meta.name !== name)) {
+        await dropPartial(key);
+        p = null;
+      }
+      const have = p ? p.size : 0;
+      if (have !== offset) {
+        rejectBody(req, res);
+        return sendJson(res, 409, { error: '이어 보낼 위치가 맞지 않아요.', received: have });
+      }
+      const free = await freeSpace(partialDir());
+      if (free !== null && total - offset > free) {
+        rejectBody(req, res);
+        return sendJson(res, 507, { error: 'PC 저장 공간이 부족해요.' });
+      }
+      const meta = p?.meta ?? { name, size: total, lastModified, to: target.to ?? null, device: ctx.device, createdAt: Date.now() };
+      if (!p) await prunePartials({ keep: MAX_PARTIALS - 1 });
+      const saveMeta = () => fsp.writeFile(metaFile, JSON.stringify({ ...meta, updatedAt: Date.now() })).catch(() => {});
+      await saveMeta();
+      try {
+        await pipeline(req, fs.createWriteStream(partFile, { flags: 'a' }));
+      } catch (err) {
+        await saveMeta();
+        if (['ECONNRESET', 'ECONNABORTED', 'ERR_STREAM_PREMATURE_CLOSE'].includes(err.code)) {
+          log('upload-paused', name); // 끊겼다: 받은 데까지 남겨 두고, 다시 보내면 이어 받는다
+          return;
+        }
+        log('error', err);
+        if (!res.headersSent && !res.destroyed) sendJson(res, 500, { error: err.code === 'ENOSPC' ? 'PC 저장 공간이 부족해요.' : '파일을 저장하지 못했어요.' });
+        return;
+      }
+      const { size: written } = await fsp.stat(partFile);
+      if (written < total) {
+        await saveMeta();
+        return sendJson(res, 202, { received: written });
+      }
+      if (written > total) {
+        await dropPartial(key);
+        return sendJson(res, 400, { error: '파일 크기가 맞지 않아요. 처음부터 다시 보내 주세요.' });
+      }
+      let finalPath;
+      try {
+        finalPath = await moveIntoPlace(partFile, receivedDir, name);
+      } catch (err) {
+        log('error', err);
+        return sendJson(res, 500, { error: '파일을 저장하지 못했어요.' });
+      }
+      await fsp.rm(metaFile, { force: true }).catch(() => {});
+      markFromInternet(finalPath);
+      if (Number.isFinite(meta.lastModified) && meta.lastModified > 0) await fsp.utimes(finalPath, new Date(), new Date(meta.lastModified)).catch(() => {});
+      const item = {
+        id: newId(),
+        kind: 'file',
+        from: ctx.peer ? 'peer' : 'remote',
+        device: ctx.device,
+        name: path.basename(finalPath),
+        size: total,
+        path: finalPath,
+        createdAt: Date.now(),
+        ...(meta.to ? { to: meta.to } : {}),
+      };
+      addItem(item);
+      return sendJson(res, 201, publicItem(item));
+    } finally {
+      resuming.delete(key);
+    }
+  }
+
   /**
    * 큰 파일을 보내기 전에 받을 수 있는지 미리 묻는다 (앱): 연결이 해제됐거나(401) 저장 공간이 모자라면(507)
    * 본문을 다 보내기 전에 알 수 있다. 본문을 보내는 중에 거절하면 보내는 쪽은 '연결이 끊김'으로만 안다.
@@ -709,6 +879,7 @@ export function createApp(options) {
     }
     const name = rawName === null ? autoName(ctx.device, type) : sanitizeFilename(rawName);
     const lastModified = Number(url.searchParams.get('lastModified'));
+    if (!ctx.isHost && url.searchParams.has('uploadId')) return resumableUpload(req, res, url, ctx, { name, lastModified, part: size, target });
     const id = newId();
     const dir = ctx.isHost ? path.join(outboxDir, id) : receivedDir;
     await fsp.mkdir(dir, { recursive: true });
@@ -964,6 +1135,11 @@ export function createApp(options) {
   function hasHostPage() {
     return [...clients].some((c) => c.isHost);
   }
+
+  // 이어 보내기로 남겨 둔 것 중 오래된 것 정리 (켤 때와 한 시간마다)
+  prunePartials().catch(() => {});
+  const partialTimer = setInterval(() => prunePartials().catch(() => {}), 60 * 60_000);
+  partialTimer.unref?.();
 
   if (drops) {
     // 기간이 지난 링크 정리 (아무도 PC 화면을 안 봐도)
