@@ -32,6 +32,11 @@ const { values: args } = parseArgs({
 const { version } = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const notes = args['notes-file'] ? fs.readFileSync(args['notes-file'], 'utf8').trim() : '';
 const OUT = args.out ? path.resolve(args.out) : path.join(ROOT, 'dist', 'release', `v${version}`);
+// 결과 폴더는 통째로 지우고 다시 만드므로, dist 안만 허락한다 (경로를 잘못 써서 다른 폴더를 지우지 않게)
+if (!OUT.startsWith(path.join(ROOT, 'dist') + path.sep)) {
+  console.error(`--out은 ${path.join(ROOT, 'dist')} 안이어야 해요: ${OUT}`);
+  process.exit(1);
+}
 const keyFile = process.env.SSOK_RELEASE_KEY ?? path.join(os.homedir(), '.ssok-release', 'update-key.pem');
 const node = (script, extra = []) => execFileSync(process.execPath, [script, ...extra], { cwd: ROOT, stdio: 'inherit' });
 
@@ -49,7 +54,20 @@ if (!crypto.verify(null, probe, UPDATE_PUBLIC_KEY, crypto.sign(null, probe, priv
 
 console.log(`== ${APP_NAME} ${version} 릴리스 준비`);
 if (!args['skip-tests']) execFileSync(process.execPath, ['--test', 'test/'], { cwd: ROOT, stdio: 'inherit' });
-if (!args['skip-android']) node('android/build.mjs');
+if (!args['skip-android']) execFileSync(process.execPath, ['android/build.mjs'], { cwd: ROOT, stdio: 'inherit', env: { ...process.env, SSOK_RELEASE: '1' } });
+else {
+  // 안드로이드를 다시 만들지 않으면, 넣을 APK가 이 버전으로 만든 것인지 확인한다 (예전 APK를 새 번호로 내보내지 않게)
+  let built = '';
+  try {
+    built = fs.readFileSync(path.join(ROOT, 'android', 'build', 'version.txt'), 'utf8').trim();
+  } catch {
+    built = '';
+  }
+  if (built !== version) {
+    console.error(`public/ssok.apk는 ${built || '알 수 없는'} 버전이에요. --skip-android 없이 다시 해 주세요.`);
+    process.exit(1);
+  }
+}
 node('scripts/build-exe.mjs');
 
 fs.rmSync(OUT, { recursive: true, force: true });

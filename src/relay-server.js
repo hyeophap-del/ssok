@@ -10,7 +10,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { acceptWebSocket } from './ws.js';
-import { sendJson, sendText } from './http.js';
+import { sendJson, sendText, cleanName, addressKey } from './http.js';
 import { APP_NAME, APP_ID } from './brand.js';
 import { cleanLinkName, DROP_ID } from './drops.js';
 import { peerRelaySecret } from './peers.js';
@@ -21,6 +21,10 @@ const PC_ID = /^[0-9a-f]{16}$/;
 const SID = /^[0-9a-f]{32}$/;
 const MAX_PCS_PER_INVITE = 10;
 const MAX_SESSIONS_PER_PC = 16;
+const MAX_PHONES_PER_ADDRESS = 8; // 한 주소에서 동시에 열 수 있는 휴대폰 연결 (한 사람이 PC의 자리를 다 차지하지 못하게)
+const HELLO_TIMEOUT_MS = 15_000; // 연결하고 이 안에 첫 인사가 없으면 닫는다
+const MAX_QUEUED_BYTES = 4 * 1024 * 1024; // PC가 받기 전에 휴대폰이 보낸 것을 모아 두는 한도
+const MAX_SHORTCUTS_IN_FLIGHT = 4; // 크기를 알리지 않은 단축어 본문을 동시에 모으는 수
 const ACCEPT_TIMEOUT_MS = 10_000;
 const PAIR_CODE_MS = 10 * 60_000;
 const MAX_LINKS_PER_PC = 20; // 링크 이름 (ssok.example.com/minsu)
@@ -59,6 +63,8 @@ function readBytes(req, limit) {
     });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
+    // 끝나기 전에 끊기면 (보내던 쪽이 그만둠, 열쇠가 틀려 이쪽에서 끊음) 기다리지 않는다
+    req.on('close', () => !req.complete && reject(Object.assign(new Error('closed'), { code: 'CLOSED' })));
   });
 }
 
@@ -137,14 +143,22 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
   } catch {
     // 처음 실행
   }
+  state.pcs = Object.assign(Object.create(null), state.pcs);
+  state.links = Object.assign(Object.create(null), state.links);
   let saveTimer = null;
   const save = () => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      fs.mkdirSync(dataDir, { recursive: true });
-      const tmp = `${stateFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(state, null, 1));
-      fs.renameSync(tmp, stateFile);
+      try {
+        fs.mkdirSync(dataDir, { recursive: true });
+        const tmp = `${stateFile}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(state, null, 1));
+        fs.renameSync(tmp, stateFile);
+      } catch (err) {
+        log('error', `relay.json을 저장하지 못했어요 (조금 뒤 다시): ${err.message}`);
+        saveTimer = setTimeout(save, 10_000);
+        saveTimer.unref?.();
+      }
     }, 300);
     saveTimer.unref?.();
   };
@@ -155,10 +169,14 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
   const live = new Set(); // 이어 둔 웹소켓 (끌 때 닫는다)
   const pairCodes = new Map(); // 연결 코드 → { pcId, expires } (PC 하나에 하나씩)
   const badTries = new Map(); // 접속한 주소 → { count, since }
+  const phonesByAddress = new Map(); // 접속한 주소 → 열어 둔 휴대폰 연결 수
+  const sessionsByPc = new Map(); // PC 번호 → 이어진 [휴대폰, PC] 연결들
+  let shortcutsInFlight = 0; // 지금 받는 중인 단축어 본문 수 (메모리에 모으므로 한도를 둔다)
 
   /** Cloudflare 터널 뒤에서는 실제 접속 주소가 이 헤더에 온다 */
   const clientAddress = (req) => String(req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '');
-  function tooManyTries(address) {
+  function tooManyTries(raw) {
+    const address = addressKey(raw);
     const entry = badTries.get(address);
     if (!entry) return false;
     if (Date.now() - entry.since > BAD_TRY_WINDOW_MS) {
@@ -167,11 +185,12 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
     }
     return entry.count >= MAX_BAD_TRIES;
   }
-  function countBadTry(address) {
+  function countBadTry(raw) {
+    const address = addressKey(raw);
     const entry = badTries.get(address);
     if (!entry || Date.now() - entry.since > BAD_TRY_WINDOW_MS) badTries.set(address, { count: 1, since: Date.now() });
     else entry.count++;
-    if (badTries.size > 10_000) badTries.clear(); // 기억할 주소가 너무 많아지면 비운다
+    while (badTries.size > 10_000) badTries.delete(badTries.keys().next().value); // 너무 많아지면 오래된 것부터 잊는다
   }
 
   // 홈페이지에서 바로 주고받기 (설치 없이 브라우저끼리, 주인이 정한 4자리 암호로)
@@ -226,7 +245,13 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
     if ((m = /^\/api\/link\/([^/]+)$/.exec(url.pathname))) {
       const address = clientAddress(req);
       if (tooManyTries(address)) return sendJson(res, 429, { error: '너무 많이 시도했어요. 10분 뒤에 다시 해 주세요.' });
-      const owner = state.links[cleanLinkName(decodeURIComponent(m[1])) ?? ''];
+      let wanted = '';
+      try {
+        wanted = cleanLinkName(decodeURIComponent(m[1])) ?? '';
+      } catch {
+        wanted = '';
+      }
+      const owner = wanted ? state.links[wanted] : null;
       if (!owner) {
         countBadTry(address);
         return sendJson(res, 404, { error: '이 링크를 찾을 수 없어요. 주소를 확인해 주세요.' });
@@ -239,7 +264,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
     if (/^[A-Za-z0-9-]+$/.test(linkName) && cleanLinkName(linkName)) return servePage(req, res, 'drop.html');
     // 휴대폰 화면에 필요한 파일만 내준다 (HTML은 /p/<PC 번호>로만, 관리 화면 파일은 내주지 않는다)
     const ext = path.extname(name);
-    if (/^[A-Za-z0-9._-]+$/.test(name) && STATIC_TYPES[ext] && ext !== '.html' && !name.startsWith('relay-admin')) return servePage(req, res, name);
+    if (/^[A-Za-z0-9._-]+$/.test(name) && STATIC_TYPES[ext] && ext !== '.html' && !name.toLowerCase().startsWith('relay-admin')) return servePage(req, res, name);
     return sendText(res, 404, 'Not Found');
   }
 
@@ -271,15 +296,14 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
     let length = Number(req.headers['content-length']);
     if (Number.isSafeInteger(length) && length > SHORTCUT_BUFFER) return fail(413, '한 번에 100MB까지 보낼 수 있어요.');
     let body;
-    if (Number.isSafeInteger(length) && length >= 0) {
-      body = spool(req, SHORTCUT_BUFFER);
-    } else {
-      try {
-        body = await readBytes(req, SHORTCUT_BUFFER);
-      } catch {
-        return fail(413, '한 번에 100MB까지 보낼 수 있어요.');
-      }
-      length = body.length;
+    let reading = null;
+    const sized = Number.isSafeInteger(length) && length >= 0;
+    if (sized) body = spool(req, SHORTCUT_BUFFER);
+    else {
+      if (shortcutsInFlight >= MAX_SHORTCUTS_IN_FLIGHT) return fail(503, '지금 받는 것이 많아요. 잠시 뒤 다시 보내 주세요.');
+      shortcutsInFlight++;
+      reading = readBytes(req, SHORTCUT_BUFFER);
+      reading.catch(() => {}).finally(() => shortcutsInFlight--);
     }
 
     let client;
@@ -291,6 +315,16 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
         return fail(401, '단축어 주소가 맞지 않아요. PC의 쏙 화면에서 주소를 다시 복사해 주세요.');
       }
       return fail(503, 'PC의 쏙이 꺼져 있거나 중계 서버에 연결되어 있지 않아요.');
+    }
+    if (reading) {
+      // 열쇠가 맞을 때만 끝까지 모은다
+      try {
+        body = await reading;
+      } catch {
+        client.close();
+        return fail(413, '한 번에 100MB까지 보낼 수 있어요.');
+      }
+      length = body.length;
     }
     const params = new URLSearchParams();
     for (const name of ['name', 'lastModified']) if (url.searchParams.has(name)) params.set(name, url.searchParams.get(name));
@@ -375,7 +409,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
     let m;
     if (url.pathname === '/ws/pc') return onControl(acceptWebSocket(req, socket, head), clientAddress(req));
     if (url.pathname === '/ws/room') return rooms.handleUpgrade(req, socket, head);
-    if ((m = /^\/ws\/c\/([0-9a-f]{16})$/.exec(url.pathname))) return onPhone(acceptWebSocket(req, socket, head), m[1]);
+    if ((m = /^\/ws\/c\/([0-9a-f]{16})$/.exec(url.pathname))) return onPhone(acceptWebSocket(req, socket, head), m[1], clientAddress(req));
     if ((m = /^\/ws\/pc-accept\/([0-9a-f]{32})$/.exec(url.pathname))) return onAccept(acceptWebSocket(req, socket, head), m[1]);
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
   }
@@ -418,7 +452,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
       if (!known && Object.values(state.pcs).filter((p) => p.invite === invite.code).length >= MAX_PCS_PER_INVITE) {
         return refuse(ws, 'too-many', `초대 코드 하나로는 PC를 ${MAX_PCS_PER_INVITE}대까지 연결할 수 있어요.`);
       }
-      const name = String(msg.name || 'PC').slice(0, 40);
+      const name = cleanName(msg.name, 'PC');
       state.pcs[msg.id] = { ...(known || { authHash: hash(msg.auth), createdAt: Date.now() }), invite: invite.code, name, version: String(msg.version || ''), lastSeen: Date.now() };
       save();
       online.get(msg.id)?.ws.close(4000, 'replaced');
@@ -492,7 +526,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
   /** PC가 연결할 때 자기 링크 목록을 다시 알려 준다 (중계 서버 자료가 사라졌을 때도 되살아나게) */
   function syncLinks(pcId, links) {
     const keep = new Set();
-    for (const { name, linkId } of links.slice(0, MAX_LINKS_PER_PC)) {
+    for (const { name, linkId } of links.filter((l) => l && typeof l === 'object').slice(0, MAX_LINKS_PER_PC)) {
       const result = claimLink(pcId, name, linkId);
       if (result.ok) keep.add(result.name);
     }
@@ -501,14 +535,33 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
   }
 
   /** 휴대폰이 들어왔다: PC에 알리고, PC가 따로 연결해 올 때까지 휴대폰 메시지를 모아 둔다 */
-  function onPhone(ws, pcId) {
+  function onPhone(ws, pcId, rawAddress = '') {
     if (!ws) return;
     const pc = online.get(pcId);
     if (!pc) return refuse(ws, 'pc-offline', 'PC의 쏙이 꺼져 있거나 중계 서버에 연결되어 있지 않아요.');
-    if ((sessionCount.get(pcId) || 0) >= MAX_SESSIONS_PER_PC) return refuse(ws, 'busy', '이 PC에 연결된 기기가 너무 많아요.');
+    const waiting = [...pending.values()].filter((p) => p.pcId === pcId).length;
+    if ((sessionCount.get(pcId) || 0) + waiting >= MAX_SESSIONS_PER_PC) return refuse(ws, 'busy', '이 PC에 연결된 기기가 너무 많아요.');
+    const address = addressKey(rawAddress);
+    if ((phonesByAddress.get(address) || 0) >= MAX_PHONES_PER_ADDRESS) return refuse(ws, 'busy', '한 곳에서 너무 많이 연결했어요. 잠시 뒤 다시 해 주세요.');
+    phonesByAddress.set(address, (phonesByAddress.get(address) || 0) + 1);
+    ws.on('close', () => {
+      const left = (phonesByAddress.get(address) || 1) - 1;
+      if (left > 0) phonesByAddress.set(address, left);
+      else phonesByAddress.delete(address);
+    });
+    // 첫 인사(암호 통로 시작)가 오지 않는 연결은 자리만 차지하므로 닫는다
+    let greeted = false;
+    ws.once('message', () => (greeted = true));
+    const hello = setTimeout(() => !greeted && ws.close(4008, 'no hello'), HELLO_TIMEOUT_MS);
+    hello.unref?.();
+    ws.on('close', () => clearTimeout(hello));
     const sid = crypto.randomBytes(16).toString('hex');
-    const entry = { phone: ws, pcId, queue: [], invite: pc.invite };
-    entry.collect = (data, binary) => entry.queue.push([data, binary]);
+    const entry = { phone: ws, pcId, queue: [], queued: 0, invite: pc.invite };
+    entry.collect = (data, binary) => {
+      entry.queued += data.length;
+      if (entry.queued > MAX_QUEUED_BYTES) return ws.close(4009, 'too much before accept');
+      entry.queue.push([data, binary]);
+    };
     ws.on('message', entry.collect);
     entry.timer = setTimeout(() => {
       pending.delete(sid);
@@ -542,6 +595,9 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
   function pipe(phone, pc, entry) {
     const invite = state.invites.find((i) => i.code === entry.invite);
     sessionCount.set(entry.pcId, (sessionCount.get(entry.pcId) || 0) + 1);
+    if (!sessionsByPc.has(entry.pcId)) sessionsByPc.set(entry.pcId, new Set());
+    const pair = [phone, pc];
+    sessionsByPc.get(entry.pcId).add(pair);
     live.add(phone).add(pc);
     const forward = (from, to) => {
       from.on('message', (data, binary) => {
@@ -564,11 +620,26 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
       counted = false;
       live.delete(phone);
       live.delete(pc);
+      sessionsByPc.get(entry.pcId)?.delete(pair);
       sessionCount.set(entry.pcId, Math.max(0, (sessionCount.get(entry.pcId) || 1) - 1));
       save();
     };
     phone.on('close', done);
     pc.on('close', done);
+  }
+
+  /** 그 PC로 이어진 연결과 기다리는 연결을 모두 끊는다 */
+  function dropSessions(pcId) {
+    for (const [phone, pc] of sessionsByPc.get(pcId) || []) {
+      phone.close(4003, 'removed');
+      pc.close(4003, 'removed');
+    }
+    for (const [sid, entry] of pending) {
+      if (entry.pcId !== pcId) continue;
+      pending.delete(sid);
+      clearTimeout(entry.timer);
+      entry.phone.close(4003, 'removed');
+    }
   }
 
   // ---- 관리 (본가 PC의 관리 화면에서 쓴다) ----
@@ -587,12 +658,17 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
       invite.disabled = Boolean(disabled);
       save();
       if (invite.disabled) {
-        for (const [, entry] of online) if (entry.invite === code) entry.ws.close(4003, 'invite disabled');
+        for (const [pcId, entry] of online) {
+          if (entry.invite !== code) continue;
+          entry.ws.close(4003, 'invite disabled');
+          dropSessions(pcId);
+        }
       }
       return true;
     },
     removePc(pcId) {
       online.get(pcId)?.ws.close(4003, 'removed');
+      dropSessions(pcId);
       delete state.pcs[pcId];
       for (const [linkName, owner] of Object.entries(state.links)) if (owner.pcId === pcId) delete state.links[linkName];
       save();

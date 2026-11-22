@@ -39,6 +39,7 @@ export class WsConnection extends EventEmitter {
   }
 
   onData(chunk) {
+    if (this.closed) return; // 닫은 뒤에 오는 것은 모으지 않는다 (상대가 닫기에 답하지 않고 계속 보내도 메모리가 늘지 않게)
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
     while (!this.closed) {
       const frame = this.readFrame();
@@ -84,17 +85,24 @@ export class WsConnection extends EventEmitter {
   }
 
   handleFrame({ fin, opcode, payload }) {
+    // 제어 프레임(닫기·ping·pong)은 125바이트 이하, 나뉘지 않은 것만 (RFC 6455 5.5)
+    if (opcode >= 0x8 && (payload.length > 125 || !fin)) return this.close(1002, 'bad control frame');
     if (opcode === 0x8) {
       // 닫기: 받은 코드로 답하고 끝낸다
       this.sendFrame(0x8, payload.subarray(0, 2));
       this.socket.end();
+      setTimeout(() => this.socket.destroy(), 2000).unref();
       return this.finish();
     }
-    if (opcode === 0x9) return this.sendFrame(0xa, payload); // ping → pong
+    if (opcode === 0x9) {
+      // ping → pong. 상대가 받아 가지 않아 내보낼 것이 쌓여 있으면 답하지 않는다 (메모리가 늘지 않게)
+      if (this.socket.writableLength < 1024 * 1024) this.sendFrame(0xa, payload);
+      return;
+    }
     if (opcode === 0xa) return this.emit('pong');
     if (opcode === 0x1 || opcode === 0x2) {
       if (this.fragments.length) return this.close(1002, 'unexpected frame');
-      if (fin) return this.emit('message', payload, opcode === 0x2);
+      if (fin) return this.deliver(payload, opcode === 0x2);
       this.fragmentType = opcode;
       this.fragments = [payload];
       return;
@@ -108,11 +116,21 @@ export class WsConnection extends EventEmitter {
         const message = Buffer.concat(this.fragments);
         const binary = this.fragmentType === 0x2;
         this.fragments = [];
-        this.emit('message', message, binary);
+        this.deliver(message, binary);
       }
       return;
     }
     this.close(1002, 'bad opcode');
+  }
+
+  /** 받은 메시지를 넘긴다. 처리하다 오류가 나도 서버 전체가 죽지 않고 이 연결만 닫는다. */
+  deliver(message, binary) {
+    try {
+      this.emit('message', message, binary);
+    } catch (err) {
+      console.error('웹소켓 메시지 처리 중 오류', err);
+      this.close(1011, 'error');
+    }
   }
 
   sendFrame(opcode, payload) {

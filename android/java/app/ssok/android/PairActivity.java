@@ -59,9 +59,27 @@ public class PairActivity extends Activity {
             fail("주소가 올바르지 않아요.");
             return;
         }
-        busy = true;
-        final int p = port;
-        new Thread(() -> pair(host, p)).start();
+        confirm(host, port);
+    }
+
+    /**
+     * 연결하기 전에 묻는다. ssok://pair 링크는 아무 웹사이트나 열 수 있으므로, 사용자가 PC 화면에서 누른 것이 맞을 때만 연결한다.
+     */
+    private void confirm(String host, int port) {
+        status.setText("이 PC와 연결할까요?");
+        code.setText("");
+        detail.setText("주소: " + host + ":" + port + "\n\nPC의 쏙 화면에서 [앱에 이 PC 연결]을 눌러 열린 것이 맞을 때만 연결하세요. 모르는 웹사이트에서 열렸다면 취소하세요.");
+        spinner.setVisibility(android.view.View.GONE);
+        final android.view.View[] buttons = new android.view.View[2];
+        buttons[0] = Ui.button(this, "연결하기", true, v -> {
+            for (android.view.View b : buttons) column.removeView(b);
+            if (busy) return;
+            busy = true;
+            new Thread(() -> pair(host, port)).start();
+        });
+        buttons[1] = Ui.button(this, "취소", false, v -> finish());
+        Ui.add(column, buttons[0], 24);
+        Ui.add(column, buttons[1], 8);
     }
 
     private void pair(String host, int port) {
@@ -77,6 +95,13 @@ public class PairActivity extends Activity {
             String pcName = ping.json.optString("name", "PC");
             String fingerprint = ping.fingerprint;
             String appId = Store.appId(this);
+            // 이미 연결해 둔 PC와 번호는 같은데 인증서가 다르면, 다른 기기가 그 PC인 척하는 것일 수 있다: 덮어쓰지 않는다
+            Store.Pc existing = Store.get(this, pcId);
+            if (existing != null && !fingerprint.equals(existing.fingerprint)) {
+                fail("이미 연결해 둔 ‘" + existing.name + "’이라고 하는데 보안 인증서가 달라요. 다른 기기가 그 PC인 척하는 것일 수 있어 연결하지 않았어요.\n\n"
+                        + "그 PC에 쏙을 새로 설치한 것이 맞다면, 앱 첫 화면에서 그 PC를 [연결 해제]한 뒤 다시 연결해 주세요.");
+                return;
+            }
 
             String na = Net.randomHex(16);
             JSONObject start = new JSONObject()

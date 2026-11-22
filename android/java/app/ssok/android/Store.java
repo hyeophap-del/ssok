@@ -129,6 +129,11 @@ final class Store {
         }
     }
 
+    /** 이미 있는 PC만 바꾼다 (그사이 사용자가 연결을 해제했으면 되살리지 않는다) */
+    static synchronized void update(Context context, Pc pc) {
+        if (get(context, pc.id) != null) save(context, pc);
+    }
+
     static synchronized void remove(Context context, String id) {
         try {
             JSONArray array = new JSONArray();

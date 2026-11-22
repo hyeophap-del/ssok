@@ -61,3 +61,19 @@ export async function readJson(req, limit) {
 export function plainAddress(address = '') {
   return address.replace(/^::ffff:/, '');
 }
+
+/** 이름(PC·기기)에서 줄바꿈 같은 제어 문자를 뺀다 (기록에 가짜 줄이 끼지 않게) */
+export const cleanName = (value, fallback) => String(value ?? '').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 40) || fallback;
+
+/** 접속 주소를 세는 단위: IPv6는 /64 (한 집이 주소를 무수히 바꿔 쓸 수 있으므로) */
+export function addressKey(address) {
+  const a = String(address || '').replace(/%.*$/, '');
+  if (!a.includes(':')) return a;
+  if (/^::ffff:\d+\.\d+\.\d+\.\d+$/i.test(a)) return a.slice(7);
+  // 줄여 쓴 주소(2001:db8::1)를 펼친 뒤 앞 네 덩어리만
+  const [head, tail = ''] = a.split('::');
+  const front = head ? head.split(':') : [];
+  const back = a.includes('::') && tail ? tail.split(':') : [];
+  const groups = [...front, ...Array(Math.max(0, 8 - front.length - back.length)).fill('0'), ...back];
+  return `${groups.slice(0, 4).map((g) => g.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}

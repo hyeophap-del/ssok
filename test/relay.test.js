@@ -174,3 +174,39 @@ test('PC의 신호(ping)에 중계 서버가 답한다 (말없이 끊긴 연결�
   await waitFor(() => messages.some((m) => m.t === 'pong'));
   ws.close();
 });
+
+test('공격에 쓰일 만한 이상한 요청에도 중계 서버가 죽거나 엉뚱하게 답하지 않는다', async () => {
+  const base = `http://127.0.0.1:${relayPort}`;
+  assert.equal((await fetch(`${base}/api/link/%zz`)).status, 404, '깨진 주소는 오류(500)가 아니라 없음');
+  assert.equal((await fetch(`${base}/api/link/constructor`)).status, 404, "'constructor'는 링크가 아니다");
+  assert.equal((await fetch(`${base}/Relay-Admin.js`)).status, 404, '관리 화면 파일은 대소문자를 바꿔도 내주지 않는다');
+});
+
+test('제어 프레임이 크거나 PC가 이상한 링크 목록을 보내도 중계 서버는 계속 일한다', async () => {
+  const net = await import('node:net');
+  const socket = net.connect(relayPort, '127.0.0.1');
+  await new Promise((r) => socket.on('connect', r));
+  socket.write(`GET /ws/pc HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+  let got = Buffer.alloc(0);
+  socket.on('data', (d) => (got = Buffer.concat([got, d])));
+  await waitFor(() => got.includes('\r\n\r\n'));
+  // 1000바이트짜리 ping (가려진 프레임)
+  const body = Buffer.alloc(1000, 7);
+  const mask = Buffer.from([1, 2, 3, 4]);
+  socket.write(Buffer.concat([Buffer.from([0x89, 0x80 | 126, body.length >> 8, body.length & 255]), mask, body.map((b, i) => b ^ mask[i % 4])]));
+  await waitFor(() => socket.destroyed || socket.readableEnded || got.length > 4, 3000);
+  const afterHandshake = got.subarray(got.indexOf('\r\n\r\n') + 4);
+  assert.notEqual(afterHandshake[0], 0x8a, '큰 ping에는 pong으로 답하지 않는다');
+  socket.destroy();
+
+  // 연결된 PC가 링크 목록에 null을 섞어 보내도 죽지 않는다
+  const pcSock = new WebSocket(`ws://127.0.0.1:${relayPort}/ws/pc`);
+  await new Promise((r) => (pcSock.onopen = r));
+  pcSock.send(JSON.stringify({ t: 'register', id: 'f0f0f0f0f0f0f0f0', auth: 'auth-for-bad-links-0123456789', invite, name: '이상한\n[가짜 기록] PC', version: 'test' }));
+  await new Promise((r) => (pcSock.onmessage = r));
+  pcSock.send(JSON.stringify({ t: 'link-sync', links: [null, 3, { name: 'okname', linkId: '0123456789abcdef' }] }));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal((await fetch(`http://127.0.0.1:${relayPort}/api/link/okname`)).status, 200, '멀쩡한 것은 받아들이고 계속 일한다');
+  assert.equal(relay.overview().invites.flatMap((i) => i.pcs).find((p) => p.id === 'f0f0f0f0f0f0f0f0')?.name.includes('\n'), false, '이름의 줄바꿈은 뺀다');
+  pcSock.close();
+});

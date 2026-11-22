@@ -74,3 +74,14 @@ test('스크립트를 실행할 수 있는 형식은 브라우저에서 바로 �
   assert.equal(isInlineSafe(mimeOf('logo.svg')), false);
   assert.equal(mimeOf('unknown.xyz'), 'application/octet-stream');
 });
+
+test('보이지 않는 방향 글자로 확장자를 속인 이름은 그 글자를 뺀다', async () => {
+  const { sanitizeFilename, isRunnable } = await import('../src/files.js');
+  assert.equal(sanitizeFilename('사진‮gpj.exe'), '사진gpj.exe');
+  assert.equal(sanitizeFilename('보고서​.pdf'), '보고서.pdf');
+  assert.equal(isRunnable('사진gpj.exe'), true);
+  assert.equal(isRunnable('설치.MSI'), true);
+  assert.equal(isRunnable('바로가기.lnk'), true);
+  assert.equal(isRunnable('사진.jpg'), false);
+  assert.equal(isRunnable('문서.pdf'), false);
+});

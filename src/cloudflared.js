@@ -190,9 +190,18 @@ export function createTunnelManager({ dir, localPort, onLog = () => {}, onChange
     return id;
   }
 
-  /** 주소(ssok.example.com)가 이 터널을 가리키게 DNS를 설정한다 */
-  async function routeDns(tunnelId, hostname) {
-    const { code, output } = await run(['tunnel', '--origincert', certFile, 'route', 'dns', '--overwrite-dns', tunnelId, hostname]);
+  /**
+   * 주소(ssok.example.com)가 이 터널을 가리키게 DNS를 설정한다.
+   * 이미 다른 기록이 있는 주소는 덮어쓰지 않는다 (www 같은 다른 웹사이트를 잘못 넣어 사이트가 멈추지 않게).
+   * overwrite: 이 중계 서버가 전에 쓰던 그 주소일 때만 (터널을 다시 만든 경우)
+   */
+  async function routeDns(tunnelId, hostname, { overwrite = false } = {}) {
+    const { code, output } = await run(['tunnel', '--origincert', certFile, 'route', 'dns', ...(overwrite ? ['--overwrite-dns'] : []), tunnelId, hostname]);
+    if (code !== 0 && !overwrite && /already exists/i.test(output)) {
+      throw new Error(
+        `${hostname}에는 Cloudflare에 이미 다른 기록이 있어요. 지금 쓰는 웹사이트일 수 있어 덮어쓰지 않았어요. 다른 이름(예: ssok2.${hostname.split('.').slice(1).join('.')})을 쓰거나, 정말 안 쓰는 기록이면 Cloudflare 화면에서 지운 뒤 다시 해 주세요.`,
+      );
+    }
     const routed = routedHostname(output);
     // 로그인할 때 고른 도메인과 다른 주소를 넣으면 cloudflared가 'ssok.a.com.b.com'처럼 그 도메인 뒤에 붙여 버린다
     if (code === 0 && routed && routed !== hostname) {

@@ -53,6 +53,8 @@ public class UploadService extends Service {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private NotificationManager notifications;
     private int pending;
+    private int lastStartId; // 가장 최근에 받은 시작 번호 (끝낼 때 그보다 새 요청이 있으면 끄지 않게)
+    private volatile boolean timedOut; // 안드로이드가 오래 걸린다고 멈추라고 했다
     private int resultId = 100;
     private Relay relay; // 이번에 보내는 동안 열어 둔 중계 통로 (여러 파일을 보낼 때 다시 쓴다)
     private boolean viaRelay; // 마지막으로 중계 서버로 보냈는지 (결과 알림에 적는다)
@@ -87,6 +89,7 @@ public class UploadService extends Service {
         else startForeground(PROGRESS_ID, starting);
         synchronized (this) {
             pending++;
+            lastStartId = startId;
         }
         worker.execute(() -> {
             try {
@@ -96,12 +99,20 @@ public class UploadService extends Service {
                     pending--;
                     if (pending == 0) {
                         stopForeground(STOP_FOREGROUND_REMOVE);
-                        stopSelf();
+                        stopSelf(lastStartId); // 그사이 새 공유가 들어왔으면 안드로이드가 끄지 않는다
                     }
                 }
             }
         });
         return START_NOT_STICKY;
+    }
+
+    /** 안드로이드 15부터: 데이터 보내기 서비스는 하루 6시간까지. 넘으면 불리고, 곧바로 멈춰야 한다. */
+    public void onTimeout(int startId, int fgsType) {
+        timedOut = true;
+        result("보내기를 멈췄어요", "안드로이드가 오래 걸리는 보내기를 멈췄어요. 남은 파일은 다시 보내 주세요.", true);
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
     }
 
     private void run(Intent intent) {
@@ -127,7 +138,7 @@ public class UploadService extends Service {
             }
             int sent = 0;
             String lastError = null;
-            for (int i = 0; uris != null && i < uris.size(); i++) {
+            for (int i = 0; uris != null && i < uris.size() && !timedOut; i++) {
                 try {
                     sendFile(pc, uris.get(i), i + 1, uris.size());
                     sent++;
@@ -174,6 +185,11 @@ public class UploadService extends Service {
 
     private void sendFile(Store.Pc pc, Uri uri, int index, int total) throws Exception {
         ContentResolver resolver = getContentResolver();
+        try (InputStream probe = resolver.openInputStream(uri)) {
+            if (probe == null) throw new RejectedException("파일을 읽을 수 없어요.");
+        } catch (IOException | SecurityException e) {
+            throw new RejectedException("파일을 읽을 수 없어요. 지워졌거나 아직 내려받지 않은 파일일 수 있어요.");
+        }
         String name = "파일";
         long size = -1;
         try (Cursor c = resolver.query(uri, new String[] {OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE}, null, null, null)) {
@@ -189,7 +205,12 @@ public class UploadService extends Service {
         if (size < 0) {
             temp = File.createTempFile("share", null, getCacheDir());
             try (InputStream in = resolver.openInputStream(uri); OutputStream out = new FileOutputStream(temp)) {
+                if (in == null) throw new RejectedException("파일을 읽을 수 없어요.");
                 copy(in, out, null);
+            } catch (Exception e) {
+                temp.delete();
+                if (e instanceof RejectedException) throw e;
+                throw new RejectedException("파일을 읽을 수 없어요. (휴대폰 저장 공간이 부족할 수 있어요)");
             }
             size = temp.length();
         }
@@ -274,12 +295,20 @@ public class UploadService extends Service {
         Map<String, String> headers = new HashMap<>();
         headers.put("content-type", contentType);
         headers.put("x-requested-with", Net.APP_ID);
+        boolean reused = relay != null;
+        Watchdog dog = new Watchdog(60_000, () -> {
+            Relay r = relay;
+            if (r != null) r.close(); // 1분 동안 하나도 못 보냈다: 통로를 닫아 멈춘 쓰기를 깨운다
+        });
         try {
             if (relay == null) relay = Relay.connect(pc.relay, pc.id, Store.appId(this), Relay.peerSecret(pc.key), Store.deviceName(this), 15000);
             Relay.Response r;
             try (InputStream in = opener.open()) {
                 if (in == null) throw new RejectedException("파일을 읽을 수 없어요.");
-                r = relay.request("POST", path, headers, in, length, progress == null ? null : progress::update);
+                r = relay.request("POST", path, headers, in, length, done -> {
+                    dog.kick();
+                    if (progress != null) progress.update(done);
+                });
             }
             JSONObject json;
             try {
@@ -290,13 +319,61 @@ public class UploadService extends Service {
             check(r.status, json);
         } catch (Relay.RelayException e) {
             closeRelay();
-            // PC에서 연결을 해제했거나(모르는 기기) 키가 바뀌었다
-            if ("UNKNOWN_PEER".equals(e.code) || "BAD_KEY".equals(e.code)) throw new UnpairedException();
+            if (reused && "CLOSED".equals(e.code)) {
+                dog.close();
+                relayRequest(pc, path, contentType, length, opener, progress); // 오래 쉬어 끊긴 통로: 새로 열어 한 번 더
+                return;
+            }
+            // PC에서 연결을 해제했거나 키가 바뀐 것 같다. 다만 이 표시는 중계 서버가 보낸 것이라 연결을 지우지는 않는다.
+            if ("UNKNOWN_PEER".equals(e.code) || "BAD_KEY".equals(e.code)) {
+                throw new IOException("PC가 이 휴대폰을 모른다고 해요. PC에서 연결을 해제했다면 앱에서 그 PC를 지우고 다시 연결해 주세요.", e);
+            }
             if ("PC_OFFLINE".equals(e.code) || "PC_TIMEOUT".equals(e.code)) throw new IOException(pc.name + "의 쏙이 꺼져 있거나 중계 서버에 연결되어 있지 않아요.", e);
             throw e;
         } catch (IOException e) {
             closeRelay(); // 끊긴 통로는 버린다 (다음 파일은 새로 연다)
+            if (reused) {
+                dog.close();
+                relayRequest(pc, path, contentType, length, opener, progress); // 오래 쉬어 끊긴 통로: 새로 열어 한 번 더
+                return;
+            }
             throw e;
+        } finally {
+            dog.close();
+        }
+    }
+
+    /** 정해진 시간 동안 kick()이 없으면 onStall을 부른다 (멈춘 연결을 끊어, 끝없이 기다리지 않게) */
+    private static final class Watchdog {
+        private volatile long last = System.currentTimeMillis();
+        private volatile boolean done;
+        private final Thread thread;
+
+        Watchdog(long limitMs, Runnable onStall) {
+            thread = new Thread(() -> {
+                while (!done) {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    if (!done && System.currentTimeMillis() - last > limitMs) {
+                        onStall.run();
+                        return;
+                    }
+                }
+            }, "ssok-watchdog");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        void kick() {
+            last = System.currentTimeMillis();
+        }
+
+        void close() {
+            done = true;
+            thread.interrupt();
         }
     }
 
@@ -342,10 +419,12 @@ public class UploadService extends Service {
             c.setRequestProperty("Content-Type", "application/octet-stream");
             String label = (total > 1 ? index + "/" + total + " · " : "") + name;
             long started = System.currentTimeMillis();
+            Watchdog dog = new Watchdog(60_000, c::disconnect);
             try (InputStream in = opener.open(); OutputStream out = c.getOutputStream()) {
                 if (in == null) throw new RejectedException(name + ": 파일을 읽을 수 없어요.");
                 long[] last = {0};
                 copy(in, out, done -> {
+                    dog.kick();
                     long now = System.currentTimeMillis();
                     if (now - last[0] < 500) return;
                     last[0] = now;
@@ -353,6 +432,8 @@ public class UploadService extends Service {
                     String speed = formatSize((long) (done / seconds)) + "/s";
                     notifications.notify(PROGRESS_ID, progress(label, (int) (done * 1000 / Math.max(1, size)), 1000, false, pc.name + "(으)로 보내는 중 · " + speed));
                 });
+            } finally {
+                dog.close();
             }
             String body = Net.readAll(c.getResponseCode() >= 400 ? c.getErrorStream() : c.getInputStream());
             JSONObject json;
@@ -395,7 +476,7 @@ public class UploadService extends Service {
             pc.alts.remove(found[0]);
             pc.host = found[0];
             pc.port = Integer.parseInt(found[1]);
-            Store.save(this, pc);
+            Store.update(this, pc);
             attempt.run();
         }
     }

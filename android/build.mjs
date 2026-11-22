@@ -64,6 +64,11 @@ function filesUnder(dir, ext) {
 // 버전은 PC 프로그램과 같이 간다 (1.2.3 → 10203)
 const { version } = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const [major, minor, patch] = version.split('.').map(Number);
+// 1.2.3 → 10203: 부 번호가 100을 넘으면 다른 버전과 번호가 겹치므로 멈춘다
+if (![major, minor, patch].every((n) => Number.isInteger(n) && n >= 0) || minor > 99 || patch > 99) {
+  console.error(`안드로이드 버전 번호로 바꿀 수 없는 버전이에요: ${version} (가운데·끝 번호는 0~99)`);
+  process.exit(1);
+}
 const versionCode = String(major * 10000 + minor * 100 + patch);
 
 fs.rmSync(OUT, { recursive: true, force: true });
@@ -101,6 +106,11 @@ console.log('5/6 서명');
 const keyDir = process.env.SSOK_ANDROID_KEYS ?? path.join(os.homedir(), '.ssok-android');
 const keystore = path.join(keyDir, 'release.jks');
 const passFile = path.join(keyDir, 'password.txt');
+if (!fs.existsSync(keystore) && process.env.SSOK_RELEASE === '1') {
+  // 릴리스 중에 새 키를 만들면, 이미 설치한 휴대폰이 업데이트를 거부한다 (서명이 달라서)
+  console.error(`안드로이드 서명 키가 없어요: ${keystore}\n백업해 둔 키를 이 자리에 넣거나 SSOK_ANDROID_KEYS로 알려 주세요.`);
+  process.exit(1);
+}
 if (!fs.existsSync(keystore)) {
   fs.mkdirSync(keyDir, { recursive: true });
   const password = crypto.randomBytes(18).toString('base64url');
@@ -114,4 +124,5 @@ fs.rmSync(`${apk}.idsig`, { force: true });
 
 console.log('6/6 확인');
 run(tools.java, ['-jar', tools.apksigner, 'verify', '--min-sdk-version', String(MIN_SDK), apk], { env: javaEnv });
+fs.writeFileSync(path.join(OUT, 'version.txt'), version); // 릴리스가 APK 버전을 확인한다 (--skip-android일 때)
 console.log(`만듦: public/ssok.apk (${(fs.statSync(apk).size / 1024).toFixed(0)}KB, 버전 ${version})`);

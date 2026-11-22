@@ -13,6 +13,8 @@ export function sanitizeFilename(input, fallback = '파일') {
   let name = String(input ?? '').normalize('NFC');
   name = name.split(/[\\/]/).pop();
   name = name.replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_');
+  // 보이지 않는 글자(글자 방향을 뒤집는 U+202E 등)는 뺀다: '사진\u202Egpj.exe'가 '사진exe.jpg'로 보이는 속임수를 막는다
+  name = name.replace(/\p{Cf}/gu, '');
   name = name.replace(/^\s+/, '').replace(/[. ]+$/, '');
   if (!name || /^\.+$/.test(name)) name = fallback;
 
@@ -25,6 +27,25 @@ export function sanitizeFilename(input, fallback = '파일') {
     name = chars.slice(0, MAX_NAME_LENGTH - extChars.length).join('').replace(/[. ]+$/, '') + extChars.join('');
   }
   return name;
+}
+
+/** 두 번 누르면 바로 실행되는 종류 (실행 파일·스크립트·바로 가기 등). 받은 것은 PC 화면에서 바로 열지 않고 폴더에서 보여 준다. */
+const RUNNABLE = new Set(
+  'exe com bat cmd msi msix msixbundle appx appxbundle msp ps1 psm1 psd1 vbs vbe js jse wsf wsh hta scr pif lnk url reg cpl jar application appref-ms chm inf gadget msc scf settingcontent-ms library-ms search-ms iso img vhd vhdx xll'.split(' '),
+);
+export const isRunnable = (name) => RUNNABLE.has(path.extname(String(name)).slice(1).toLowerCase());
+
+/**
+ * 다른 기기에서 받은 파일에 '인터넷에서 받은 파일' 표시(Mark of the Web)를 남긴다.
+ * 그러면 Windows가 실행하기 전에 경고하고(SmartScreen), Office 문서는 보호된 보기로 연다. Windows가 아니면 하지 않는다.
+ */
+export function markFromInternet(file) {
+  if (process.platform !== 'win32') return;
+  try {
+    fs.writeFileSync(`${file}:Zone.Identifier`, '[ZoneTransfer]\r\nZoneId=3\r\n');
+  } catch {
+    // FAT32·exFAT(USB 등)에는 표시를 남길 수 없다
+  }
 }
 
 /** dir 안에서 겹치지 않는 경로를 찾는다. "사진.jpg"가 있으면 "사진 (1).jpg", "사진 (2).jpg" … */

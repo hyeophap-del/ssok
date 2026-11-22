@@ -52,7 +52,7 @@ function local(urlPath, headers = {}) {
   return new Promise((resolve, reject) => {
     const port = app.server.address().port;
     http
-      .get({ host: '127.0.0.1', port, path: urlPath, headers: { Host: `127.0.0.1:${port}`, ...headers } }, (res) => {
+      .get({ host: '127.0.0.1', port, path: urlPath, agent: false, headers: { Host: `127.0.0.1:${port}`, ...headers } }, (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') }));

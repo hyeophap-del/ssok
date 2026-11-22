@@ -9,6 +9,9 @@ import { SecureSocket, FRAME, CHUNK } from '../public/relay.js';
 const PASS_REQUEST = ['content-type', 'content-length', 'x-requested-with', 'range', 'accept', 'user-agent'];
 const PASS_RESPONSE = ['content-type', 'content-length', 'content-disposition', 'content-range', 'accept-ranges', 'last-modified'];
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'DELETE']);
+// 이 PC의 쏙 서버로 넘길 때 연결을 다시 쓰지 않는다: 한 요청의 본문이 다음 요청으로 읽히는 일(요청 밀반입)이 생기지 않게
+const localAgent = new http.Agent({ keepAlive: false });
+const MAX_SESSIONS = 32; // 중계로 동시에 이어 둘 수 있는 기기 수
 // 연결된 다른 PC가 중계로 쓸 수 있는 것: 파일·텍스트 보내기, 연결 해제, 중계 주소 확인 (휴대폰 권한은 주지 않는다)
 const PEER_ROUTES = new Set(['POST /api/upload', 'POST /api/text', 'POST /api/peer/unpair', 'GET /api/peer/info']);
 const PEER_ID = /^[0-9a-f]{16}$/;
@@ -155,6 +158,8 @@ export function startRelayClient({
     ws.onerror = () => {};
     ws.onopen = () => {
       ws.send(JSON.stringify({ t: 'accept', id: pcId, auth: pcAuth }));
+      // 한꺼번에 너무 많이 들어오면 (누가 일부러 자리를 채우는 등) 받자마자 닫는다
+      if (sessions.size >= MAX_SESSIONS) return ws.close();
       const session = serve(ws);
       sessions.add(session);
       session.closed.then(() => sessions.delete(session));
@@ -198,6 +203,12 @@ export function startRelayClient({
       },
     });
     secure.ready.then((info) => !secure.hello?.kid && log('relay-phone', info?.device || '휴대폰')).catch(() => {});
+    // 암호 통로를 15초 안에 열지 못한 연결은 닫는다 (인사 없이 자리만 차지하는 연결)
+    const deadline = setTimeout(() => ws.close(), 15_000);
+    secure.ready.then(
+      () => clearTimeout(deadline),
+      () => clearTimeout(deadline),
+    );
     const refuse = (id, status) => secure.send(FRAME.RES_HEAD, id, { status, headers: {} }).then(() => secure.send(FRAME.RES_END, id, {})).catch(() => {});
 
     const raws = new Map(); // 그대로 통과시키는 연결 → 이 PC의 쏙 서버에 붙인 소켓
@@ -253,7 +264,10 @@ export function startRelayClient({
         const head = JSON.parse(decode(payload));
         const path = String(head.path || '');
         if (!METHODS.has(head.method) || !path.startsWith('/') || path.startsWith('//')) return refuse(id, 400);
+        if (streams.size >= 16) return refuse(id, 429); // 한 기기가 동시에 여는 요청 수 (느린 요청으로 자리를 채우지 못하게)
         const headers = pick(Object.fromEntries(Object.entries(head.headers || {}).map(([k, v]) => [k.toLowerCase(), v])), PASS_REQUEST);
+        // 본문 길이는 숫자만, 그리고 그만큼만 넘긴다 (아래 REQ_DATA에서 센다)
+        if (headers['content-length'] !== undefined && !/^\d{1,15}$/.test(String(headers['content-length']))) return refuse(id, 400);
         headers.host = `127.0.0.1:${localPort}`;
         headers['x-ssok-relay'] = relayKey;
         const kid = secure.hello?.kid;
@@ -280,8 +294,9 @@ export function startRelayClient({
         } else {
           headers.cookie = cookie;
         }
-        const req = http.request({ host: '127.0.0.1', port: localPort, method: head.method, path, headers });
-        const entry = { req, res: null };
+        const req = http.request({ host: '127.0.0.1', port: localPort, method: head.method, path, headers, agent: localAgent });
+        req.strictContentLength = true; // 말한 길이와 다른 본문은 보내지 않는다
+        const entry = { req, res: null, left: headers['content-length'] === undefined ? Infinity : Number(headers['content-length']) };
         streams.set(id, entry);
         req.on('response', async (res) => {
           entry.res = res;
@@ -317,8 +332,18 @@ export function startRelayClient({
       }
       const entry = streams.get(id);
       if (!entry) return;
-      if (type === FRAME.REQ_DATA) entry.req.write(Buffer.from(payload));
-      else if (type === FRAME.REQ_END) {
+      if (type === FRAME.REQ_DATA) {
+        if (entry.req.writableEnded) return;
+        if (payload.length > entry.left) {
+          // 말한 길이보다 많이 보냈다: 그 뒤는 다른 요청으로 읽힐 수 있으니 이 요청을 버린다
+          streams.delete(id);
+          entry.req.destroy();
+          secure.send(FRAME.CANCEL, id, {}).catch(() => {});
+          return;
+        }
+        entry.left -= payload.length;
+        entry.req.write(Buffer.from(payload));
+      } else if (type === FRAME.REQ_END) {
         if (!entry.req.writableEnded) entry.req.end();
       } else if (type === FRAME.CANCEL) {
         streams.delete(id);

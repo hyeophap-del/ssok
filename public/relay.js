@@ -29,6 +29,7 @@ export const FRAME = {
   FILE_CANCEL: 23,
   FILE_DONE: 24, // 받는 쪽 → 보낸 쪽: 다 받았어요
   TEXT: 25, // { text }
+  ROOM_READY: 27, // 방: 방 열쇠를 받았다고 모두에게 알린다 (보낼 때 받을 기기로 센다)
   FILE_PROGRESS: 26, // 받는 쪽 → 보낸 쪽: { n: 지금까지 받은 바이트 } (보낸 쪽 진행률과 보내는 속도 조절에 쓴다)
 };
 
@@ -212,8 +213,18 @@ export class SecureSocket {
   }
 
   /** 아직 내보내지 못한 양이 많으면 기다린다 (큰 파일을 보낼 때 메모리가 넘치지 않게) */
-  async drain(limit = 1024 * 1024) {
-    while (!this.closed && this.ws.bufferedAmount > limit) await sleep(15);
+  async drain(limit = 4 * 1024 * 1024, stop = null) {
+    let last = this.ws.bufferedAmount;
+    let movedAt = Date.now();
+    while (!this.closed && this.ws.bufferedAmount > limit && !stop?.()) {
+      await sleep(15);
+      if (this.ws.bufferedAmount < last) movedAt = Date.now();
+      last = this.ws.bufferedAmount;
+      if (Date.now() - movedAt > 20_000) {
+        this.close();
+        throw new Error('연결이 멈춰서 끊었어요. 다시 해 주세요.');
+      }
+    }
   }
 
   fail(err) {
@@ -347,6 +358,7 @@ export class RelayClient {
    */
   async request(method, path, { headers = {}, body = null, onUploadProgress, onChunk, signal } = {}) {
     if (this.closed) throw new Error('연결이 끊겼어요');
+    if (signal?.aborted) throw new DOMException('취소됨', 'AbortError'); // 다시 연결하는 사이에 취소를 눌렀다
     const id = this.nextId;
     this.nextId += 2;
     const stream = createStream(onChunk);
@@ -377,7 +389,7 @@ export class RelayClient {
           for (let at = 0; at < chunk.length; at += CHUNK) {
             const data = chunk.subarray(at, at + CHUNK);
             await this.socket.send(FRAME.REQ_DATA, id, data);
-            await this.socket.drain();
+            await this.socket.drain(undefined, () => !this.streams.has(id));
             sent += data.length;
             onUploadProgress?.(sent);
           }
@@ -388,7 +400,7 @@ export class RelayClient {
           const piece = bytes.slice(offset, Math.min(size, offset + CHUNK));
           const data = piece instanceof Uint8Array ? piece : new Uint8Array(await piece.arrayBuffer());
           await this.socket.send(FRAME.REQ_DATA, id, data);
-          await this.socket.drain();
+          await this.socket.drain(undefined, () => !this.streams.has(id));
           onUploadProgress?.(Math.min(size, offset + data.length));
         }
       }
@@ -442,7 +454,13 @@ function createStream(onChunk) {
         bytes: body,
         text: async () => new TextDecoder().decode(await body()),
         json: async () => JSON.parse(new TextDecoder().decode(await body())),
-        blob: async (type) => new Blob([await body()], { type: type || headers['content-type'] || '' }),
+        blob: async (type) => {
+          await ended;
+          const wanted = String(type || headers['content-type'] || '');
+          const blob = new Blob(chunks, { type: /^image\/(png|jpeg|gif|webp)$/i.test(wanted.split(';')[0].trim()) ? wanted : 'application/octet-stream' });
+          chunks.length = 0;
+          return blob;
+        },
       });
     },
     data(payload) {

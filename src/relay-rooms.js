@@ -4,7 +4,7 @@
 //   - 방 안의 메시지는 '방 열쇠'로 종단간 암호화한다 (public/room-core.js). 이 서버는 받는 사람에게 나눠 주기만 한다.
 import crypto from 'node:crypto';
 import { acceptWebSocket } from './ws.js';
-import { sendJson, sendEmpty, readJson } from './http.js';
+import { sendJson, sendEmpty, readJson, cleanName, addressKey } from './http.js';
 import { encodeQR, toSvg } from './qr.js';
 
 export const WEB_PIN = /^\d{4}$/;
@@ -16,7 +16,7 @@ const MAX_ROOMS_PER_ADDRESS = 5;
 const MAX_MEMBERS = 10; // 한 방에 들어올 수 있는 기기 수
 const PING_MS = 20_000; // 기기마다 이 간격으로 신호를 보낸다
 const SILENT_MS = 50_000; // 이만큼 아무 답이 없으면 끊긴 기기로 보고 내보낸다 (잠든 휴대폰, 닫힌 창 등)
-const STALL_MS = 30_000; // 한 기기에 보낼 것이 이만큼 밀려 있으면 그 기기를 내보낸다 (방 전체가 멈추지 않게)
+const STALL_MS = 15_000; // 한 기기에 보낼 것이 이만큼 (하나도 못 받아 가고) 밀려 있으면 그 기기를 내보낸다 (방 전체가 멈추지 않게)
 const MAX_WRONG = 10; // 암호·방 코드를 이만큼 틀리면 그 주소는 잠시 막는다
 const WRONG_WINDOW_MS = 10 * 60_000;
 const MAX_WRONG_ALL = 300; // 여러 주소에서 몰려와도: 10분 동안 전체로 이만큼 틀리면 잠시 모두 막는다
@@ -56,19 +56,22 @@ export function createRoomService({ state, save, clientAddress, log = () => {}, 
   const enabled = () => WEB_PIN.test(state.web.pin || '');
 
   // ---- 틀린 횟수 ----
-  function blocked(address) {
+  /** @param {boolean} [all]  여러 주소를 합친 한도도 볼지 (암호 넣기는 보고, 입장권이 있는 사람의 방 코드는 주소별로만) */
+  function blocked(raw, all = true) {
+    const address = addressKey(raw);
     if (Date.now() - wrongAll.since > WRONG_WINDOW_MS) wrongAll = { count: 0, since: Date.now() };
-    if (wrongAll.count >= MAX_WRONG_ALL) return true;
+    if (all && wrongAll.count >= MAX_WRONG_ALL) return true;
     const entry = wrong.get(address);
     if (entry && Date.now() - entry.since > WRONG_WINDOW_MS) wrong.delete(address);
     return (wrong.get(address)?.count ?? 0) >= MAX_WRONG;
   }
-  function countWrong(address) {
-    wrongAll.count++;
+  function countWrong(raw, all = true) {
+    const address = addressKey(raw);
+    if (all) wrongAll.count++;
     const entry = wrong.get(address);
     if (entry) entry.count++;
     else wrong.set(address, { count: 1, since: Date.now() });
-    if (wrong.size > 10_000) wrong.clear();
+    while (wrong.size > 10_000) wrong.delete(wrong.keys().next().value);
   }
 
   // ---- 입장권 (쿠키) ----
@@ -146,7 +149,7 @@ export function createRoomService({ state, save, clientAddress, log = () => {}, 
       } catch {
         msg = null;
       }
-      const device = String(msg?.device || '기기').slice(0, 40);
+      const device = cleanName(msg?.device, '기기');
       // 그 기기의 ECDH 공개 열쇠: 방 열쇠를 건네받을 때 쓴다 (중계 서버는 그대로 전하기만 한다)
       const e = /^04[0-9a-f]{128}$/i.test(String(msg?.e || '')) ? String(msg.e) : '';
       if (!e) return ws.close(4002, 'bad message');
@@ -183,18 +186,23 @@ export function createRoomService({ state, save, clientAddress, log = () => {}, 
   }
 
   function join(ws, address, device, e, code, origin) {
-    if (blocked(address)) {
+    // 방 코드는 입장권(암호를 맞힌 브라우저)이 있어야 넣으므로 주소별로만 센다 (몇 사람이 틀려도 모두가 막히지 않게)
+    if (blocked(address, false)) {
       ws.sendJson({ t: 'error', code: 'too-many', message: '코드를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요.' });
       return ws.close(4003, 'too many');
     }
     const room = /^\d{6}$/.test(code) ? rooms.get(code) : null;
     if (!room) {
-      countWrong(address);
+      countWrong(address, false);
       ws.sendJson({ t: 'error', code: 'no-room', message: '그 코드의 방이 없어요. 숫자를 확인하거나 방을 만든 사람에게 새 코드를 받아 주세요.' });
       return ws.close(4004, 'no room');
     }
     if (room.members.size >= MAX_MEMBERS) {
       ws.sendJson({ t: 'error', code: 'full', message: `한 방에는 ${MAX_MEMBERS}대까지 들어올 수 있어요.` });
+      return ws.close(4003, 'full');
+    }
+    if (room.nextId > 0xffff) {
+      ws.sendJson({ t: 'error', code: 'full', message: '이 방은 더 들어올 수 없어요. 새 방을 만들어 주세요.' });
       return ws.close(4003, 'full');
     }
     room.everJoined = true;
@@ -237,7 +245,7 @@ export function createRoomService({ state, save, clientAddress, log = () => {}, 
         }
         if (msg?.t === 'rename') {
           // 방에서 보일 이름 바꾸기
-          member.device = String(msg.device || '').trim().slice(0, 40) || member.device;
+          member.device = cleanName(msg.device, member.device);
           for (const m of room.members.values()) if (m !== member) m.ws.sendJson({ t: 'member-rename', id: member.id, device: member.device });
           return;
         }
@@ -306,7 +314,7 @@ export function createRoomService({ state, save, clientAddress, log = () => {}, 
       state.web.pin = pin === null ? null : String(pin);
       state.web.version += 1;
       save();
-      if (pin === null) for (const room of rooms.values()) for (const m of room.members.values()) m.ws.close(4003, 'web off');
+      for (const room of rooms.values()) for (const m of room.members.values()) m.ws.close(4003, pin === null ? 'web off' : 'pin changed');
     },
     overview: () => ({ enabled: enabled(), pin: state.web.pin, bytes: state.web.bytes || 0, rooms: rooms.size, connected: live.size }),
     /** 지금 주고받는 중인 방이 있는지 (업데이트를 미룰지 정할 때) */

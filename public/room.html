@@ -42,6 +42,12 @@
     }
     .name-field input:focus { outline: none; border-color: var(--accent); background: var(--surface); }
     .me-line { font-size: 13px; color: var(--muted); margin: -6px 0 0; }
+    .gone {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px;
+      border: 1px solid var(--danger); border-radius: var(--radius-sm); font-size: 14px;
+    }
+    .gone[hidden] { display: none; }
+    .gone span { flex: 1; min-width: 0; }
     .list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
     .xfer { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; }
     .xfer-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -80,7 +86,7 @@
     <section id="home-view" hidden>
       <div class="room-head">
         <h1>설치 없이 바로 주고받기</h1>
-        <p class="muted small">기기마다 이 홈페이지를 열고 같은 방에 들어오면 파일·사진·텍스트를 주고받을 수 있어요 (한 방에 10대까지). 방에 들어온 기기 말고는 아무도 내용을 볼 수 없어요 (종단간 암호화).</p>
+        <p class="muted small">기기마다 이 홈페이지를 열고 같은 방에 들어오면 파일·사진·텍스트를 주고받을 수 있어요 (한 방에 10대까지). 내용은 암호화되어 오가고 어디에도 저장되지 않아요.</p>
       </div>
       <div class="card center-card" style="margin-top: 16px">
         <label class="name-field">내 이름 <span class="muted small">다른 기기에 이렇게 보여요</span>
@@ -101,13 +107,17 @@
       <h2>다른 기기에서 이 코드를 넣으세요</h2>
       <div id="room-code" class="room-code"></div>
       <div id="room-qr" class="room-qr" aria-label="방에 들어오는 QR 코드"></div>
-      <p class="muted small">다른 기기에서 <b id="room-host"></b>에 들어가 코드를 넣거나, 휴대폰 카메라로 QR을 찍으세요. 여러 기기가 들어와도 돼요. 10분 동안 기다려요.</p>
+      <p class="muted small">다른 기기에서 <b id="room-host"></b>에 들어가 코드를 넣거나, 휴대폰 카메라로 QR을 찍으세요. 여러 기기가 들어와도 돼요. 이 화면을 켜 둔 채로 기다려 주세요 (10분).</p>
       <button id="wait-cancel" class="btn ghost" type="button">그만두기</button>
     </section>
 
     <!-- 연결됨: 주고받기 -->
     <section id="session-view" hidden>
       <div class="card session-main">
+        <div id="gone" class="gone" role="alert" hidden>
+          <span id="gone-text"></span>
+          <button id="gone-home" class="btn small primary" type="button">새로 시작</button>
+        </div>
         <div class="peer-line">
           <strong id="peer-name">방</strong>
           <button id="rename" class="btn small ghost" type="button" title="이 방에서 보일 내 이름 바꾸기">이름</button>

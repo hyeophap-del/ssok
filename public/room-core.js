@@ -14,6 +14,8 @@ const subtle = () => globalThis.crypto.subtle;
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
 const WRAP_INFO = new TextEncoder().encode('ssok-room-key-v1');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 보낸 기기 번호 (암호에 함께 묶는 값) */
+const senderTag = (id) => new Uint8Array([(id >> 8) & 255, id & 255]);
 
 async function wrapKeyFor(myPair, theirPublicHex, salt) {
   const theirs = await subtle().importKey('raw', fromHex(theirPublicHex), ECDH, false, []);
@@ -98,7 +100,7 @@ export class RoomPeer {
     const from = new DataView(bytes.buffer, bytes.byteOffset).getUint16(0);
     let plain;
     try {
-      plain = new Uint8Array(await subtle().decrypt({ name: 'AES-GCM', iv: bytes.subarray(2, 14) }, this.roomKey, bytes.subarray(14)));
+      plain = new Uint8Array(await subtle().decrypt({ name: 'AES-GCM', iv: bytes.subarray(2, 14), additionalData: senderTag(from) }, this.roomKey, bytes.subarray(14)));
     } catch {
       return; // 풀리지 않는 메시지는 무시한다
     }
@@ -109,6 +111,7 @@ export class RoomPeer {
   async receiveControl(msg) {
     if (msg.t === 'error') {
       const err = Object.assign(new Error(msg.message || '방에 들어가지 못했어요'), { code: String(msg.code || 'error') });
+      this.lastError = err;
       this.rejectJoined(err);
       return;
     }
@@ -199,7 +202,7 @@ export class RoomPeer {
       if (this.closed) throw new Error('방이 닫혔어요');
       await this.keyed;
       const iv = randomBytes(12);
-      const sealed = new Uint8Array(await subtle().encrypt({ name: 'AES-GCM', iv }, this.roomKey, frame(type, id, payload)));
+      const sealed = new Uint8Array(await subtle().encrypt({ name: 'AES-GCM', iv, additionalData: senderTag(this.you) }, this.roomKey, frame(type, id, payload)));
       const out = new Uint8Array(14 + sealed.length);
       new DataView(out.buffer).setUint16(0, to);
       out.set(iv, 2);
@@ -210,9 +213,12 @@ export class RoomPeer {
     return this.outbox;
   }
 
-  /** 아직 내보내지 못한 양이 많으면 기다린다 (큰 파일을 보낼 때) */
-  async drain(limit = 1024 * 1024) {
-    while (!this.closed && this.ws.bufferedAmount > limit) await sleep(15);
+  /** 아직 내보내지 못한 양이 많으면 기다린다 (큰 파일을 보낼 때). 기다리는 동안 onWait을 부른다 (진행 표시를 고치려고) */
+  async drain(limit = 4 * 1024 * 1024, onWait = null) {
+    while (!this.closed && this.ws.bufferedAmount > limit) {
+      onWait?.();
+      await sleep(15);
+    }
   }
 
   fail(err) {

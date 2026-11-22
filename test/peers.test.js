@@ -274,11 +274,13 @@ test('휴대폰이나 연결된 PC는 PC 화면 전용 기능을 쓸 수 없고,
   const asPeer = { Authorization: `Bearer ${key}` };
   assert.equal((await request(pcs.B, { path: '/api/peers', headers: asPeer, secure: true })).status, 403);
   assert.equal((await postJson(pcs.B, '/api/open-folder', {}, asPeer, { secure: true })).status, 403);
-  const session = await request(pcs.B, { path: '/api/session', headers: asPeer, secure: true });
-  assert.equal(session.json.isHost, false);
-  assert.equal(session.json.device, 'PC-A');
+  // 연결된 PC는 보내기 통로일 뿐: B가 받은 목록을 보거나 내려받거나 지우지 못한다
+  assert.equal((await request(pcs.B, { path: '/api/session', headers: asPeer, secure: true })).status, 403);
+  assert.equal((await request(pcs.B, { path: '/api/items', headers: asPeer, secure: true })).status, 403);
+  assert.equal((await request(pcs.B, { path: '/api/events', headers: asPeer, secure: true })).status, 403);
+  assert.equal((await request(pcs.B, { path: '/api/files/0123456789abcdef', headers: asPeer, secure: true })).status, 403);
 
-  const overPlainHttp = await request(pcs.B, { path: '/api/session', headers: asPeer });
+  const overPlainHttp = await request(pcs.B, { path: '/api/upload?name=x', headers: asPeer });
   assert.equal(overPlainHttp.status, 401, '평문(HTTP)으로 온 키는 맞아도 받지 않는다');
 
   const wrong = await postBytes(pcs.B, '/api/upload?name=x', 'x', { Authorization: 'Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, { secure: true });

@@ -157,7 +157,14 @@ export async function runRelayHost({ args, exe, sourceRoot, version, extractAsse
         for (let i = 0; i < 40 && (await pingRelay(500)); i++) await sleep(250);
         await sleep(500); // cloudflared가 끝날 시간
       }
-      await copyWithRetry(process.execPath, installed);
+      try {
+        await copyWithRetry(process.execPath, installed);
+      } catch (err) {
+        console.error(`새 버전을 설치하지 못해 예전 버전으로 다시 켜요: ${err.message}`);
+        if (running && fs.existsSync(installed)) spawn(installed, ['--relay', '--launch', '--no-open'], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
+        process.exitCode = 1;
+        return;
+      }
       spawn(installed, ['--relay', '--launch', ...(args['no-open'] ? ['--no-open'] : [])], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
       return;
     }
@@ -191,12 +198,32 @@ export async function runRelayHost({ args, exe, sourceRoot, version, extractAsse
   // ---- 중계 서버 본체 ----
   const root = exe ? extractAssets(home, version) : sourceRoot;
   const publicDir = path.join(root, 'public');
+  let logMinute = 0;
+  let logLines = 0;
+  let logDropped = 0;
   const log = (type, payload) => {
+    const minute = Math.floor(Date.now() / 60_000);
+    if (minute !== logMinute) {
+      if (logDropped) console.log(`  (기록이 너무 많아 ${logDropped}줄을 건너뛰었어요)`);
+      logMinute = minute;
+      logLines = 0;
+      logDropped = 0;
+    }
+    if (++logLines > 200) return void logDropped++;
     const time = new Date().toLocaleTimeString('ko-KR', { hour12: false });
     if (type === 'error') console.error(`  [${time}] 오류: ${payload?.stack || payload}`);
     else console.log(`  [${time}] ${payload}`);
   };
   if (args.background) console.log(`\n=== ${RELAY_NAME} ${version} 시작 ${new Date().toLocaleString('ko-KR')} ===`);
+  // 처리하지 못한 오류가 있어도 중계 서버가 조용히 꺼지지 않게 (다시 켜 줄 것이 없다): 기록하고 계속한다.
+  // 짧은 시간에 너무 많이 나면 망가진 상태로 보고 끈다 (그때는 다음 로그인 때 다시 켜진다).
+  let crashes = [];
+  process.on('uncaughtException', (err) => {
+    log('error', err);
+    crashes = crashes.filter((t) => Date.now() - t < 60_000).concat(Date.now());
+    if (crashes.length > 20) process.exit(1);
+  });
+  process.on('unhandledRejection', (err) => log('error', err));
   let config = readJson(configPath) ?? {};
 
   const relay = createRelayServer({ dataDir: home, publicDir, version, log });
@@ -259,7 +286,7 @@ export async function runRelayHost({ args, exe, sourceRoot, version, extractAsse
         setup.step = 'tunnel';
         const id = await tunnel.ensureTunnel();
         setup.step = 'dns';
-        await tunnel.routeDns(id, hostname);
+        await tunnel.routeDns(id, hostname, { overwrite: config.hostname === hostname });
         config = saveConfig(configPath, { hostname });
         setup.step = 'start';
         tunnel.restart();
@@ -302,6 +329,10 @@ export async function runRelayHost({ args, exe, sourceRoot, version, extractAsse
       log('info', `새 버전 ${updater.state().available?.version}으로 바꿔요`);
       // 새 exe가 이 프로세스를 끄고 자기 자신을 설치한 뒤 다시 켠다
       spawn(relayFile, ['--relay', '--launch', '--no-open'], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
+      setTimeout(() => {
+        updating = false; // 2분이 지나도 이 프로세스가 살아 있으면 바꾸기가 실패한 것
+        log('error', '새 버전으로 바꾸지 못했어요. 나중에 다시 해 볼게요.');
+      }, 120_000).unref();
     } catch (err) {
       updating = false;
       log('error', `업데이트하지 못했어요: ${err.message}`);

@@ -46,12 +46,12 @@ public class MainActivity extends Activity {
                 try {
                     Net.Result ping = Net.json(pc.host, pc.port, "GET", "/api/ping", null, null, pc.fingerprint, 4000);
                     // PC에 Tailscale을 나중에 깔았거나 주소가 바뀌었으면 알아 둔다
-                    if (ping.status == 200 && pc.updateAlts(ping.json.optJSONArray("addrs"))) Store.save(this, pc);
+                    if (ping.status == 200 && pc.updateAlts(ping.json.optJSONArray("addrs"))) Store.update(this, pc);
                     // PC에서 '어디서나 (중계 서버)'를 켜거나 바꿨으면 알아 둔다
                     if (ping.status == 200) {
                         Net.Result info = Net.json(pc.host, pc.port, "GET", "/api/peer/info", null, pc.key, pc.fingerprint, 4000);
                         if (info.status == 200 && pc.updateRelay(info.json)) {
-                            Store.save(this, pc);
+                            Store.update(this, pc);
                             runOnUiThread(this::render);
                         }
                     }

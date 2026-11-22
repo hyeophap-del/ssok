@@ -288,6 +288,8 @@ function setupHost() {
   document.addEventListener('paste', (e) => {
     const files = [...(e.clipboardData?.files || [])];
     if (!files.length) return;
+    const editable = e.target instanceof HTMLElement && (e.target.closest('input, textarea, [contenteditable=""], [contenteditable="true"]') !== null);
+    if (editable && [...(e.clipboardData?.types || [])].includes('text/plain')) return;
     e.preventDefault();
     enqueue(files.map(nameScreenshot));
   });
@@ -658,7 +660,7 @@ function renderItem(item) {
     const img = el('img', { src: RELAY ? undefined : fileUrl(item, true), alt: '', loading: 'lazy', decoding: 'async' });
     img.addEventListener('error', () => img.remove());
     // 어디서나(중계) 모드에서는 암호화된 통로로 받아 화면에 붙인다
-    if (RELAY) relayBlobUrl(fileUrl(item, true)).then((url) => (img.src = url), () => img.remove());
+    if (RELAY) lazyThumb(thumb, img, fileUrl(item, true));
     thumb.append(img);
   }
 
@@ -757,7 +759,9 @@ async function onItemClick(e) {
     }
     case 'open':
     case 'reveal':
-      post(`/api/items/${item.id}/${target.dataset.action}`).catch(showError);
+      post(`/api/items/${item.id}/${target.dataset.action}`)
+        .then((answer) => answer?.revealed && toast('실행 파일이라 바로 열지 않고 폴더에서 보여 줘요. 보낸 사람을 믿을 수 있을 때만 여세요.'))
+        .catch(showError);
       break;
     case 'delete':
       try {
@@ -772,7 +776,10 @@ async function onItemClick(e) {
 }
 
 /** 어디서나(중계) 모드에서 파일 받기: 암호화된 통로로 받아 휴대폰에 저장한다 */
+const relayDownloading = new Set();
 async function relayDownload(item) {
+  if (relayDownloading.has(item.id)) return toast(`‘${item.name}’은(는) 받는 중이에요.`);
+  relayDownloading.add(item.id);
   if (item.size > 500 * 1024 * 1024) toast('큰 파일이라 시간이 걸려요. 집 Wi-Fi에서 받으면 더 빨라요.');
   else toast(`‘${item.name}’ 받는 중…`);
   try {
@@ -787,6 +794,8 @@ async function relayDownload(item) {
     markDownloaded(item.id);
   } catch (err) {
     showError(err);
+  } finally {
+    relayDownloading.delete(item.id);
   }
 }
 
@@ -795,13 +804,51 @@ async function relayBlobUrl(path) {
   if (!blobUrls.has(path)) {
     blobUrls.set(
       path,
-      request('GET', path).then(async (res) => {
-        if (!res.ok) throw new Error('미리보기를 받지 못했어요');
-        return URL.createObjectURL(await res.blob());
-      }),
+      request('GET', path)
+        .then(async (res) => {
+          if (!res.ok) throw new Error('미리보기를 받지 못했어요');
+          return URL.createObjectURL(await res.blob());
+        })
+        .catch((err) => {
+          blobUrls.delete(path); // 실패한 것은 다음에 다시 받아 본다
+          throw err;
+        }),
     );
   }
   return blobUrls.get(path);
+}
+
+let thumbObserver = null;
+const thumbQueue = [];
+let thumbsLoading = 0;
+function lazyThumb(box, img, path) {
+  thumbObserver ??= new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        thumbObserver.unobserve(entry.target);
+        thumbQueue.push(entry.target);
+      }
+      pumpThumbs();
+    },
+    { rootMargin: '300px' },
+  );
+  box.thumb = { img, path };
+  thumbObserver.observe(box);
+}
+function pumpThumbs() {
+  while (thumbsLoading < 3 && thumbQueue.length) {
+    const box = thumbQueue.shift();
+    if (!box.isConnected) continue;
+    const { img, path } = box.thumb;
+    thumbsLoading++;
+    relayBlobUrl(path)
+      .then((url) => (img.src = url), () => img.remove())
+      .finally(() => {
+        thumbsLoading--;
+        pumpThumbs();
+      });
+  }
 }
 
 function download(item) {
@@ -1795,3 +1842,14 @@ function timeAgo(timestamp) {
 }
 
 init();
+
+// 파일 고르기 버튼을 키보드로도 (Enter·스페이스)
+for (const label of document.querySelectorAll('label.big-btn')) {
+  label.tabIndex = 0;
+  label.setAttribute('role', 'button');
+  label.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    label.querySelector('input')?.click();
+  });
+}

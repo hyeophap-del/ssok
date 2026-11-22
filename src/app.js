@@ -5,7 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
-import { sanitizeFilename, moveIntoPlace, mimeOf, isInlineSafe, contentDisposition } from './files.js';
+import { sanitizeFilename, moveIntoPlace, mimeOf, isInlineSafe, contentDisposition, isRunnable, markFromInternet } from './files.js';
 import { isAllowedHost, isOwnAddress } from './net.js';
 import { encodeQR, toSvg } from './qr.js';
 import { sendJson, sendText, sendEmpty, rejectBody, readBody, readJson } from './http.js';
@@ -234,6 +234,13 @@ export function createApp(options) {
       rejectBody(req, res);
       return sendText(res, 421, 'Misdirected Request');
     }
+    // 중계로 온 요청이 지나간 연결에서는 중계 표시가 없는 요청을 받지 않는다
+    // (본문 뒤에 다른 요청을 몰래 붙여, 이 PC 안에서 온 'PC 화면' 요청인 척하는 것을 막는다)
+    if (Boolean(relayKey) && safeEqual(req.headers['x-ssok-relay'], relayKey)) req.socket.ssokRelayed = true;
+    else if (req.socket.ssokRelayed) {
+      log('error', '중계 연결에서 표시 없는 요청을 막았어요');
+      return req.socket.destroy();
+    }
     const url = new URL(req.url, 'http://localhost');
     const ctx = authenticate(req, url);
     if (url.pathname.startsWith('/api/')) return api(req, res, url, ctx);
@@ -373,6 +380,13 @@ export function createApp(options) {
     if (pathname === '/api/drops' || pathname.startsWith('/api/drops/')) return dropsApi(req, res, url, ctx);
 
     if (peers && (await peers.handle(req, res, url, ctx))) return;
+    // 연결된 다른 PC·안드로이드 앱은 보내기 통로일 뿐: 이 PC의 받은 목록을 보거나 지우지 못한다
+    if (ctx.peer) {
+      if (pathname === '/api/upload' && method === 'POST') return upload(req, res, url, ctx);
+      if (pathname === '/api/text' && method === 'POST') return postText(req, res, ctx);
+      rejectBody(req, res);
+      return sendJson(res, 403, { error: '연결된 PC·앱은 보내기만 할 수 있어요.' });
+    }
     if (pathname === '/api/session' && method === 'GET') return sendJson(res, 200, session(ctx, req));
     if (pathname === '/api/items' && method === 'GET') return sendJson(res, 200, { items: store.list().filter(visibleTo(ctx)).map(publicItem) });
     if (pathname === '/api/events' && method === 'GET') return events(req, res, ctx);
@@ -595,6 +609,7 @@ export function createApp(options) {
   }
 
   function events(req, res, ctx) {
+    if (clients.size >= 64) return sendJson(res, 503, { error: '연결된 화면이 너무 많아요.' });
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -720,6 +735,7 @@ export function createApp(options) {
       return sendJson(res, err.status || 500, { error: err.status ? err.message : '파일을 저장하지 못했어요.' });
     }
 
+    if (!ctx.isHost) markFromInternet(finalPath); // 다른 기기에서 온 파일: 실행하기 전에 Windows가 경고하게
     if (Number.isFinite(lastModified) && lastModified > 0) {
       // 사진 찍은 날짜 같은 원래 수정 시각을 유지한다
       await fsp.utimes(finalPath, new Date(), new Date(lastModified)).catch(() => {});
@@ -785,6 +801,11 @@ export function createApp(options) {
     const item = store.get(id);
     if (!item || item.kind !== 'file' || !fs.existsSync(item.path)) {
       return sendJson(res, 404, { error: 'PC에서 파일이 옮겨지거나 지워졌어요.' });
+    }
+    // 다른 기기에서 받은 실행 파일·스크립트는 바로 실행하지 않고 폴더에서 보여 준다 (링크로 받은 것일 수도 있다)
+    if (action === 'open' && item.from !== 'host' && isRunnable(item.name)) {
+      opener.reveal(item.path);
+      return sendJson(res, 200, { revealed: true });
     }
     opener[action](item.path);
     return sendEmpty(res);

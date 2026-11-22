@@ -3,6 +3,7 @@ package app.ssok.android;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
+import android.content.ContentResolver;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
@@ -24,11 +25,19 @@ public class ShareActivity extends Activity {
         if (Intent.ACTION_SEND.equals(intent.getAction())) {
             Uri uri = stream(intent);
             if (uri != null) uris.add(uri);
-            else text = intent.getStringExtra(Intent.EXTRA_TEXT);
+            else {
+                // 서식 있는 글자(굵게 등)를 보내는 앱도 있어 CharSequence로 받는다
+                CharSequence shared = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+                text = shared == null ? null : shared.toString();
+            }
         } else if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
             ArrayList<Uri> list = streams(intent);
             if (list != null) uris.addAll(list);
         }
+        // 다른 앱이 건넨 파일은 content:// 만 받는다. file://은 이 앱의 권한으로 열리므로 이 앱의 설정 파일(PC 열쇠)을 가리킬 수 있다.
+        int before = uris.size();
+        uris.removeIf(u -> u == null || !ContentResolver.SCHEME_CONTENT.equals(u.getScheme()));
+        if (uris.size() < before) Toast.makeText(this, "보낼 수 없는 형식의 파일은 뺐어요", Toast.LENGTH_SHORT).show();
         if (uris.isEmpty() && (text == null || text.trim().isEmpty())) {
             Toast.makeText(this, "보낼 내용이 없어요", Toast.LENGTH_SHORT).show();
             finish();

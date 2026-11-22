@@ -219,8 +219,9 @@ function renderInbox(items) {
         li.append(copy);
       } else {
         li.append(icon('i-file'), el('span', 'name', item.name), el('span', 'muted small', formatSize(item.size)));
-        const get = el('button', downloaded.has(item.id) ? 'btn small' : 'btn small primary', downloaded.has(item.id) ? '다시 받기' : '받기');
+        const get = el('button', downloaded.has(item.id) ? 'btn small' : 'btn small primary', downloading.has(item.id) ? '받는 중…' : downloaded.has(item.id) ? '다시 받기' : '받기');
         get.type = 'button';
+        get.disabled = downloading.has(item.id);
         get.addEventListener('click', () => downloadItem(item, get));
         li.append(get);
       }
@@ -229,7 +230,10 @@ function renderInbox(items) {
   );
 }
 
+const downloading = new Set(); // 받는 중인 항목 번호
 async function downloadItem(item, button) {
+  if (downloading.has(item.id)) return;
+  downloading.add(item.id);
   button.disabled = true;
   const label = button.textContent;
   button.textContent = '받는 중…';
@@ -255,7 +259,9 @@ async function downloadItem(item, button) {
     button.textContent = label;
     toast(err.code ? '연결이 끊겼어요. 다시 해 주세요.' : err.message, 'error');
   } finally {
+    downloading.delete(item.id);
     button.disabled = false;
+    refreshInbox(); // 그사이 목록을 새로 그렸으면 단추가 바뀌었을 수 있다
   }
 }
 
@@ -416,3 +422,14 @@ document.addEventListener('visibilitychange', () => {
 });
 
 start();
+
+// 파일 고르기 버튼을 키보드로도 (Enter·스페이스)
+for (const label of document.querySelectorAll('label.big-btn')) {
+  label.tabIndex = 0;
+  label.setAttribute('role', 'button');
+  label.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    label.querySelector('input')?.click();
+  });
+}

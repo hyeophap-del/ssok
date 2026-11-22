@@ -38,7 +38,8 @@ const realSend = WsConnection.prototype.send;
 function local(method, urlPath, { headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const port = app.server.address().port;
-    const req = http.request({ host: '127.0.0.1', port, method, path: urlPath, headers: { Host: `127.0.0.1:${port}`, ...headers } }, (res) => {
+    // 요청마다 새 연결 (중계 표시가 지나간 연결은 쏙 서버가 다시 쓰지 않는다)
+    const req = http.request({ host: '127.0.0.1', port, method, path: urlPath, agent: false, headers: { Host: `127.0.0.1:${port}`, ...headers } }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
@@ -288,4 +289,25 @@ test('중계 서버는 /<링크 이름>으로 링크 화면을 내준다', async
   assert.equal((await fetch(`${relayBase}/drop.js`)).status, 200);
   assert.equal((await fetch(`${relayBase}/api`)).status, 404);
   assert.equal((await local('GET', '/drop.html')).status, 404, 'PC의 쏙은 링크 화면 파일을 내주지 않는다');
+});
+
+test('중계로 온 요청 본문에 다른 요청을 몰래 붙여도 PC 화면 권한을 얻지 못한다 (요청 밀반입)', async () => {
+  // 링크 이름만 아는 사람: 틀린 비밀번호로 열고, 본문 길이를 5라고 해 놓고 그 뒤에 PC 화면만 할 수 있는 요청을 붙인다
+  assert.equal((await host('POST', '/api/drops', { label: '시험', name: 'smuggle-test', pin: '5678', days: 1 })).status, 201);
+  await waitFor(async () => (await fetch(`${relayBase}/api/link/smuggle-test`)).ok);
+  const pc = await openLink('smuggle-test', 'wrong-pin');
+  const port = app.server.address().port;
+  const hidden = JSON.stringify({ label: '몰래', name: 'smuggled', pin: '1234', days: 1 });
+  const smuggled =
+    `POST /api/drops HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nX-Requested-With: ${APP_ID}\r\nContent-Type: application/json\r\n` +
+    `Content-Length: ${Buffer.byteLength(hidden)}\r\n\r\n${hidden}`;
+  async function* body() {
+    yield new TextEncoder().encode('AAAAA' + smuggled);
+  }
+  const res = await pc.request('POST', '/api/text', { headers: { 'content-type': 'application/json', 'content-length': '5', 'x-requested-with': APP_ID }, body: body() }).catch((err) => err);
+  pc.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const list = await host('GET', '/api/drops');
+  assert.equal(list.json.links.some((d) => d.name === 'smuggled'), false, '몰래 붙인 요청이 PC 화면 권한으로 처리되면 안 된다');
+  assert.notEqual(res?.status, 200);
 });
