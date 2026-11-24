@@ -245,7 +245,7 @@ function renderWeb() {
     web.enabled
       ? el('span', { class: 'ok' }, `● 켜짐 · 암호 ${web.pin}`)
       : el('span', { class: 'muted' }, '꺼짐 (암호를 정하면 켜져요)'),
-    web.enabled ? el('span', { class: 'muted' }, `지금 방 ${web.rooms}개 · 기기 ${web.connected}대 · 지금까지 ${formatSize(web.bytes)}`) : null,
+    web.enabled ? el('span', { class: 'muted' }, `지금 방 ${web.rooms}개 · 보관 방 ${web.vaults ?? 0}개 (${formatSize(web.vaultBytes ?? 0)} 보관 중) · 기기 ${web.connected}대 · 지금까지 ${formatSize(web.bytes)}`) : null,
   );
 }
 

@@ -194,7 +194,7 @@ export function createRelayServer({ dataDir, publicDir, version, log = () => {},
   }
 
   // 홈페이지에서 바로 주고받기 (설치 없이 브라우저끼리, 주인이 정한 4자리 암호로)
-  const rooms = createRoomService({ state, save, clientAddress, log, timing: roomTiming });
+  const rooms = createRoomService({ state, save, clientAddress, log, timing: roomTiming, vaultDir: path.join(dataDir, 'rooms') });
 
   // ---- 웹 페이지 ----
 

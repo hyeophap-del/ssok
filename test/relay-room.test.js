@@ -279,3 +279,73 @@ test("'모두'에게 보낼 때 받지 못하는 기기를 뺄 수 있고, 빈 �
   assert.deepEqual(textsOf(c), ['다시 모두']);
   for (const p of [a, b, c]) p.close();
 });
+
+test('보관 방: 혼자 만들어 올려 두면, 나중에 혼자 들어온 기기가 방 코드로 열쇠를 풀고 처음부터 받는다 (중계 서버를 다시 켜도)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssok-vault-'));
+  const start = async () => {
+    const r = createRelayServer({ dataDir: dir, publicDir: path.join(ROOT, 'public'), version: 'test' });
+    await new Promise((resolve) => r.server.listen(0, '127.0.0.1', resolve));
+    return r;
+  };
+  let vaultRelay = await start();
+  vaultRelay.setWebPin('8642');
+  const base = () => `http://127.0.0.1:${vaultRelay.server.address().port}`;
+  const loginCookie = async () =>
+    (await fetch(`${base()}/api/web/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '8642' }) })).headers.get('set-cookie').split(';')[0];
+  const open = async (options) => {
+    const peer = await RoomPeer.open(`${base().replace('http', 'ws')}/ws/room`, { ...options, headers: { cookie: await loginCookie() } });
+    peer.got = [];
+    peer.onFrame = (from, type, id, payload) => peer.got.push({ from, type, id, payload: payload.slice() });
+    return peer;
+  };
+  try {
+    // 혼자 만들고 올려 둔다
+    const owner = await open({ create: true, keep: 1, device: '민수 노트북' });
+    await owner.keyed;
+    assert.ok(owner.vault && owner.owner, '보관 방이고, 만든 브라우저만 닫을 수 있는 표시를 받는다');
+    assert.ok(owner.vault.expiresAt > Date.now() + 23 * 3600_000);
+    const photo = Buffer.concat([Buffer.from(MARKER), crypto.randomBytes(200_000)]);
+    await owner.send(0, FRAME.TEXT, 11, { text: '회의 자료 올려 둠' });
+    await owner.send(0, FRAME.FILE_HEAD, 12, { name: '자료.pdf', size: photo.length });
+    for (let at = 0; at < photo.length; at += 64 * 1024) await owner.send(0, FRAME.FILE_DATA, 12, photo.subarray(at, at + 64 * 1024));
+    await owner.send(0, FRAME.FILE_END, 12, {});
+    await new Promise((r) => setTimeout(r, 300));
+    const code = owner.code;
+    const ownerToken = owner.owner;
+    owner.close();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(vaultRelay.webOverview().vaults, 1, '모두 나가도 보관 방은 남는다');
+
+    // 중계 서버를 다시 켠다 (업데이트 등)
+    await vaultRelay.close();
+    vaultRelay = await start();
+    assert.equal(vaultRelay.webOverview().vaults, 1, '다시 켜도 보관 방이 있다');
+
+    // 아무도 없는 방에 혼자 들어온 기기: 방 코드로 열쇠를 풀고, 올려 둔 것을 처음부터 받는다
+    const friend = await open({ code, device: '친구 휴대폰' });
+    await friend.keyed;
+    await waitFor(() => friend.vaultReady && friend.got.some((f) => f.type === FRAME.FILE_END));
+    const text = friend.got.find((f) => f.type === FRAME.TEXT);
+    assert.equal(JSON.parse(new TextDecoder().decode(text.payload)).text, '회의 자료 올려 둠');
+    assert.deepEqual(Buffer.concat(friend.got.filter((f) => f.type === FRAME.FILE_DATA).map((f) => f.payload)), photo);
+    assert.equal(friend.history.get(text.from), '민수 노트북', '나간 기기가 올려 둔 것에도 이름이 붙는다');
+    assert.equal(fs.readFileSync(path.join(dir, 'rooms', code, 'log.bin')).includes(Buffer.from(MARKER)), false, '중계 서버 디스크에는 암호문만 남는다');
+
+    // 만든 브라우저만 닫을 수 있다
+    const notices = [];
+    friend.onNotice = (m) => notices.push(m);
+    friend.closeVault('not-the-owner');
+    await waitFor(() => notices.length === 1);
+    assert.equal(vaultRelay.webOverview().vaults, 1);
+    const closedReason = new Promise((resolve) => (friend.onClose = resolve));
+    const again = await open({ code, device: '민수 휴대폰' });
+    again.closeVault(ownerToken);
+    assert.equal(await closedReason, 'room closed');
+    assert.equal(vaultRelay.webOverview().vaults, 0);
+    assert.equal(fs.existsSync(path.join(dir, 'rooms', code)), false, '닫으면 디스크에서도 지운다');
+    await assert.rejects(open({ code, device: '늦은 기기' }), (err) => err.code === 'no-room');
+  } finally {
+    await vaultRelay.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

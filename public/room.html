@@ -47,6 +47,16 @@
       border: 1px solid var(--danger); border-radius: var(--radius-sm); font-size: 14px;
     }
     .gone[hidden] { display: none; }
+    .vault-title { margin: 0; font-size: 16px; }
+    .vault-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+    .vault-row select {
+      min-height: 44px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--text); font: inherit;
+    }
+    .my-vaults { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; text-align: left; }
+    .my-vaults li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); font-size: 14px; }
+    .my-vaults li span { flex: 1; min-width: 0; }
+    .danger { color: var(--danger); }
     .gone span { flex: 1; min-width: 0; }
     .list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
     .xfer { display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; }
@@ -100,6 +110,19 @@
         </form>
         <p id="home-error" class="error-text" hidden></p>
       </div>
+      <div class="card center-card vault-card" style="margin-top: 16px">
+        <h2 class="vault-title">혼자 올려 두기 (보관 방)</h2>
+        <p class="muted small">방을 만들고 파일·텍스트를 올려 두면 창을 닫아도 남아요. 나중에 다른 기기나 사람이 방 코드로 들어와 받아 가요. 올려 둔 것은 암호화해 중계 서버에 보관하고, 기간이 지나거나 방을 닫으면 지워요. 방 코드를 아는 사람은 누구나 열 수 있어요.</p>
+        <div class="vault-row">
+          <select id="keep-days" aria-label="남겨 둘 기간">
+            <option value="1">1일 동안</option>
+            <option value="3">3일 동안</option>
+            <option value="7">7일 동안</option>
+          </select>
+          <button id="create-vault" class="btn" type="button">보관 방 만들기</button>
+        </div>
+        <ul id="my-vaults" class="my-vaults" hidden></ul>
+      </div>
     </section>
 
     <!-- 방을 만들고 상대를 기다리는 중 -->
@@ -122,6 +145,7 @@
           <strong id="peer-name">방</strong>
           <button id="rename" class="btn small ghost" type="button" title="이 방에서 보일 내 이름 바꾸기">이름</button>
           <button id="invite" class="btn small" type="button">더 초대</button>
+          <button id="close-vault" class="btn small ghost danger" type="button" hidden>방 닫기</button>
           <button id="leave" class="btn small ghost" type="button">나가기</button>
         </div>
         <div id="invite-box" class="center-card" hidden>

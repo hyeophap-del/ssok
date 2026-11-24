@@ -14,6 +14,12 @@ const subtle = () => globalThis.crypto.subtle;
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
 const WRAP_INFO = new TextEncoder().encode('ssok-room-key-v1');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 보관 방: 방 코드로 방 열쇠를 감싸는 열쇠 (중계 서버에 맡겨 두고, 나중에 혼자 들어온 기기가 방 코드로 푼다) */
+async function codeKey(code, saltHex) {
+  const base = await subtle().importKey('raw', new TextEncoder().encode(`ssok-vault-v1:${code}`), 'PBKDF2', false, ['deriveKey']);
+  return subtle().deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: fromHex(saltHex), iterations: 200_000 }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
 /** 보낸 기기 번호 (암호에 함께 묶는 값) */
 const senderTag = (id) => new Uint8Array([(id >> 8) & 255, id & 255]);
 
@@ -44,7 +50,7 @@ export class RoomPeer {
    * @param {string} url  wss://<중계 서버>/ws/room
    * @param {{create?: boolean, code?: string, device: string, headers?: object, WebSocketImpl?: any}} options
    */
-  static async open(url, { create = false, code = '', device, headers, WebSocketImpl = globalThis.WebSocket }) {
+  static async open(url, { create = false, keep = 0, code = '', device, headers, WebSocketImpl = globalThis.WebSocket }) {
     const peer = new RoomPeer();
     peer.device = device;
     peer.pair = await subtle().generateKey(ECDH, true, ['deriveBits']);
@@ -65,7 +71,7 @@ export class RoomPeer {
       peer.inbox = peer.inbox.then(() => peer.receive(event.data)).catch((err) => peer.fail(err));
     };
     ws.onclose = (event) => peer.finish(event.reason || 'closed');
-    ws.send(JSON.stringify(create ? { t: 'create', device, e: peer.publicHex } : { t: 'join', code, device, e: peer.publicHex }));
+    ws.send(JSON.stringify(create ? { t: 'create', device, e: peer.publicHex, ...(keep ? { keep } : {}) } : { t: 'join', code, device, e: peer.publicHex }));
     await peer.joined;
     return peer;
   }
@@ -81,6 +87,10 @@ export class RoomPeer {
     this.onFrame = null;
     this.onMembers = null;
     this.onClose = null;
+    this.onNotice = null; // (message) 중계 서버가 알려 준 것 (보관 자리 부족 등)
+    this.vault = null; // 보관 방이면 { expiresAt, size, limit }
+    this.vaultReady = false; // 남겨 둔 것을 다 받았다
+    this.history = new Map(); // 보관 방에 들어왔던 기기 번호 → 이름 (나간 기기가 올려 둔 것에 이름을 붙이려고)
     this.joined = new Promise((resolve, reject) => {
       this.resolveJoined = resolve;
       this.rejectJoined = reject;
@@ -121,13 +131,34 @@ export class RoomPeer {
       this.url = msg.url;
       this.qrSvg = msg.qrSvg;
       for (const m of msg.members) this.members.set(m.id, m);
+      if (msg.vault) {
+        this.vault = { expiresAt: msg.vault.expiresAt, size: msg.vault.size, limit: msg.vault.limit };
+        this.history = new Map(Object.entries(msg.vault.names || {}).map(([id, name]) => [Number(id), name]));
+        if (msg.owner) this.owner = msg.owner;
+        try {
+          if (msg.t === 'room' && this.roomKey) await this.storeKey();
+          else if (!this.roomKey && msg.vault.key) await this.unwrapKey(msg.vault.key);
+        } catch {
+          // 풀리지 않으면 방에 있는 기기가 건네주기를 기다린다
+        }
+      }
       if (this.roomKey) this.resolveKeyed();
       this.resolveJoined();
       this.onMembers?.(this.memberList());
       return;
     }
+    if (msg.t === 'vault-full' || msg.t === 'notice') {
+      this.onNotice?.(String(msg.message || ''));
+      return;
+    }
+    if (msg.t === 'vault-ready') {
+      this.vaultReady = true;
+      this.onMembers?.(this.memberList());
+      return;
+    }
     if (msg.t === 'member-join') {
       this.members.set(msg.id, { id: msg.id, device: msg.device, e: msg.e });
+      if (this.vault) this.history.set(msg.id, msg.device);
       this.onMembers?.(this.memberList(), { joined: msg });
       // 방 열쇠를 가진 기기는 새 기기에게 건넨다 (여럿이 건네도 새 기기는 처음 것을 쓴다)
       if (this.roomKey && /^04[0-9a-f]{128}$/i.test(msg.e || '')) {
@@ -148,6 +179,7 @@ export class RoomPeer {
       if (!member) return;
       const before = member.device;
       member.device = msg.device;
+      if (this.vault) this.history.set(msg.id, msg.device);
       this.onMembers?.(this.memberList(), { renamed: { id: msg.id, from: before, to: msg.device } });
       return;
     }
@@ -170,6 +202,27 @@ export class RoomPeer {
         // 풀리지 않으면 다른 기기가 건넨 것을 기다린다
       }
     }
+  }
+
+  /** 보관 방을 만들었다: 방 열쇠를 방 코드로 감싸 중계 서버에 맡긴다 */
+  async storeKey() {
+    const salt = toHex(randomBytes(16));
+    const iv = randomBytes(12);
+    const wrap = await codeKey(this.code, salt);
+    const k = new Uint8Array(await subtle().encrypt({ name: 'AES-GCM', iv }, wrap, this.roomKeyRaw));
+    this.ws.send(JSON.stringify({ t: 'store-key', salt, iv: toHex(iv), k: toHex(k) }));
+  }
+
+  /** 보관 방에 들어왔다: 맡겨 둔 방 열쇠를 방 코드로 푼다 (방에 아무도 없어도 들어갈 수 있게) */
+  async unwrapKey({ salt, iv, k }) {
+    const wrap = await codeKey(this.code, salt);
+    this.roomKeyRaw = new Uint8Array(await subtle().decrypt({ name: 'AES-GCM', iv: fromHex(iv) }, wrap, fromHex(k)));
+    this.roomKey = await subtle().importKey('raw', this.roomKeyRaw, 'AES-GCM', true, ['encrypt', 'decrypt']);
+  }
+
+  /** 보관 방을 닫는다 (만든 브라우저만: 그때 받은 표시가 있어야 한다) */
+  closeVault(owner) {
+    if (!this.closed) this.ws.send(JSON.stringify({ t: 'close-room', owner }));
   }
 
   /** 방에서 보일 내 이름을 바꾼다 (다른 기기에도 바로 알린다) */

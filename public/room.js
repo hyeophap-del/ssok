@@ -10,7 +10,7 @@ const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hos
 
 let peer = null;
 let target = 0; // 0 = 모두, 아니면 그 기기 번호
-let nextId = 1;
+let nextId = (crypto.getRandomValues(new Uint32Array(1))[0] & 0x3fffffff) + 1; // 보내는 것마다 붙이는 번호 (보관 방에서 예전 번호와 겹치지 않게 아무 데서나 시작)
 const outgoing = new Map(); // 보내는 중: 번호 → { abort, view, update, size, to, acked: 받을 기기 → 받은 양, heard: 받을 기기 → 마지막 소식, done }
 const incoming = new Map(); // 받는 중: '보낸 기기:번호' → { name, size, type, chunks, received, view, update, from }
 let sending = Promise.resolve(); // 보낼 파일은 하나씩 차례로
@@ -23,6 +23,8 @@ const CLOSE_REASONS = {
   'pin changed': '홈페이지 암호가 바뀌어 방이 닫혔어요.',
   'web off': '홈페이지 주고받기가 꺼졌어요.',
   'server closing': '중계 서버가 다시 시작해요. 잠시 뒤 새로 시작해 주세요.',
+  'room closed': '보관 방이 닫혔어요.',
+  expired: '보관 기간이 지나 방이 닫혔어요.',
 };
 
 // ---- 화면 도구 ----
@@ -95,7 +97,45 @@ function displayNames() {
   }
   return names;
 }
-const nameOf = (id) => displayNames().get(id) ?? '나간 기기';
+const nameOf = (id) => displayNames().get(id) ?? peer?.history.get(id) ?? '나간 기기';
+
+// ---- 내 보관 방 (이 브라우저에서 만든 것: 다시 들어가기·닫기) ----
+const VAULTS_KEY = 'ssok.vaults';
+function myVaults() {
+  try {
+    const list = JSON.parse(localStorage.getItem(VAULTS_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((v) => /^\d{6}$/.test(v?.code) && v.expiresAt > Date.now()) : [];
+  } catch {
+    return [];
+  }
+}
+function saveVaults(list) {
+  try {
+    localStorage.setItem(VAULTS_KEY, JSON.stringify(list));
+  } catch {
+    // 저장하지 못하면 목록에만 안 보인다
+  }
+}
+const forgetVault = (code) => saveVaults(myVaults().filter((v) => v.code !== code));
+const ownerOf = (code) => myVaults().find((v) => v.code === code)?.owner ?? null;
+const untilText = (time) => new Date(time).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', weekday: 'short', hour: 'numeric', minute: '2-digit' });
+
+function renderMyVaults() {
+  const list = myVaults();
+  saveVaults(list); // 기간이 지난 것은 지운다
+  $('my-vaults').hidden = !list.length;
+  $('my-vaults').replaceChildren(
+    ...list.map((v) => {
+      const li = el('li');
+      li.append(el('span', '', `방 ${v.code.slice(0, 3)} ${v.code.slice(3)} · ${untilText(v.expiresAt)}까지`));
+      const go = el('button', 'btn small', '들어가기');
+      go.type = 'button';
+      go.addEventListener('click', () => joinRoom(v.code));
+      li.append(go);
+      return li;
+    }),
+  );
+}
 
 /** 방에서 보일 내 이름 (이 브라우저에 기억) */
 const NAME_KEY = 'ssok.roomName';
@@ -154,6 +194,7 @@ function goHome() {
   show('home-view');
   $('my-name').value = myName() === deviceName() ? '' : myName();
   $('my-name').placeholder = `예: 민수 노트북 (비우면 ‘${deviceName()}’)`;
+  renderMyVaults();
   setStatus('waiting', '준비됨');
   // QR로 들어왔으면 (주소 끝 #123456) 바로 그 방에 들어간다
   const code = /^#(\d{6})$/.exec(location.hash)?.[1];
@@ -247,20 +288,25 @@ async function openRoomOnce(options) {
   else saveName('');
   const turn = ++opening;
   closeRoom();
-  for (const id of ['create', 'join-code']) $(id).disabled = true;
+  for (const id of ['create', 'create-vault', 'join-code']) $(id).disabled = true;
   setStatus('connecting', options.create ? '방을 만드는 중…' : '들어가는 중…');
   let room;
   try {
     room = await RoomPeer.open(wsUrl, { ...options, device: myName() });
   } catch (err) {
-    for (const id of ['create', 'join-code']) $(id).disabled = false;
+    for (const id of ['create', 'create-vault', 'join-code']) $(id).disabled = false;
     if (turn !== opening) return;
     if (err.code === 'CONNECT' || err.code === 'CLOSED') return notice('연결하지 못했어요', '암호가 바뀌었을 수 있어요. 새로 고쳐 다시 해 주세요.');
     return notice(err.code === 'no-room' ? '방을 찾지 못했어요' : '방에 들어가지 못했어요', err.message);
   }
-  for (const id of ['create', 'join-code']) $(id).disabled = false;
+  for (const id of ['create', 'create-vault', 'join-code']) $(id).disabled = false;
   if (turn !== opening) return room.close(); // 그사이 다른 방을 열었으면 이 연결은 닫는다
   peer = room;
+  if (room.vault && room.owner) {
+    // 이 브라우저가 만든 보관 방: 나중에 다시 들어가고 닫을 수 있게 남겨 둔다
+    saveVaults([...myVaults().filter((v) => v.code !== room.code), { code: room.code, owner: room.owner, expiresAt: room.vault.expiresAt }]);
+  }
+  room.onNotice = (message) => peer === room && message && toast(message, 'error');
   joinedAt = Date.now();
   // 내가 들어오기 전부터 있던 기기는 방 열쇠를 가지고 있다. 새로 들어오는 기기는 열쇠를 받았다고 알려 올 때까지 기다린다.
   for (const m of room.memberList()) if (!m.me) keyHolders.add(m.id);
@@ -289,6 +335,7 @@ async function openRoomOnce(options) {
   };
   room.onFrame = (from, type, id, payload) => peer === room && onFrame(from, type, id, payload);
   room.onClose = (reason) => {
+    if (room.vault && ['room closed', 'expired'].includes(reason)) forgetVault(room.code);
     if (peer === room) disconnected(room.lastError?.message || CLOSE_REASONS[reason] || '연결이 끊겼어요. 다시 주고받으려면 새로 시작하세요.');
   };
   for (const [id, code, host] of [['room-code', 'room-qr', 'room-host'], ['invite-code', 'invite-qr', 'invite-host']]) {
@@ -311,14 +358,22 @@ function renderRoom() {
   const list = others();
   const inSession = !$('session-view').hidden;
   // 방을 만들고 아직 아무도 안 들어왔으면 코드를 크게 보여 주며 기다린다 (주고받다가 모두 나가면 그 화면에 그대로 둔다)
-  if (!list.length && !inSession && peer.ready) {
+  if (!list.length && !inSession && peer.ready && !peer.vault) {
     show('wait-view');
     setStatus('waiting', '다른 기기를 기다리는 중');
     return;
   }
   show('session-view');
-  $('peer-name').textContent = list.length ? `방 · ${list.length + 1}대` : '방 · 다른 기기를 기다리는 중';
-  $('me-line').textContent = `나: ${peer.device} · 함께: ${list.map((m) => m.device).join(', ') || '아직 없음'}`;
+  $('peer-name').textContent = peer.vault
+    ? `보관 방 · ${list.length ? `${list.length + 1}대` : '혼자'}`
+    : list.length
+      ? `방 · ${list.length + 1}대`
+      : '방 · 다른 기기를 기다리는 중';
+  $('close-vault').hidden = !(peer.vault && ownerOf(peer.code));
+  if (peer.vault && !inSession && !list.length) $('invite-box').hidden = false; // 혼자 만들었으면 코드부터 보여 준다
+  $('me-line').textContent = peer.vault
+    ? `${untilText(peer.vault.expiresAt)}까지 남아요 · 나: ${peer.device}${list.length ? ` · 함께: ${list.map((m) => m.device).join(', ')}` : ''}${peer.vaultReady || peer.owner ? '' : ' · 올려 둔 것을 받는 중…'}`
+    : `나: ${peer.device} · 함께: ${list.map((m) => m.device).join(', ') || '아직 없음'}`;
   $('key-wait').hidden = peer.ready;
   if (!peer.ready) {
     $('key-wait').textContent = !list.length
@@ -327,7 +382,7 @@ function renderRoom() {
         ? '방 열쇠를 아직 받지 못했어요. 방을 만든 기기의 화면이 켜져 있는지 확인해 주세요.'
         : '방 열쇠를 받는 중이에요… (방에 있는 기기가 건네줘요)';
   }
-  setStatus(peer.ready ? 'online' : 'connecting', peer.ready ? `${list.length + 1}대 연결됨` : '방 열쇠 받는 중…');
+  setStatus(peer.ready ? 'online' : 'connecting', peer.ready ? (peer.vault && !list.length ? '보관 방 · 올려 둘 수 있어요' : `${list.length + 1}대 연결됨`) : '방 열쇠 받는 중…');
   const chips = [chip(0, '모두')].concat(list.map((m) => chip(m.id, m.device)));
   $('targets').replaceChildren(...chips);
 }
@@ -345,6 +400,12 @@ function chip(id, label) {
 }
 
 $('create').addEventListener('click', () => openRoom({ create: true }));
+$('create-vault').addEventListener('click', () => openRoom({ create: true, keep: Number($('keep-days').value) || 1 }));
+$('close-vault').addEventListener('click', () => {
+  const owner = peer && ownerOf(peer.code);
+  if (!owner || !confirm('보관 방을 닫을까요? 올려 둔 것이 모두 지워지고, 이 방에 있는 기기도 모두 나가요.')) return;
+  peer.closeVault(owner);
+});
 function joinRoom(code) {
   $('home-error').hidden = true;
   if (!/^\d{6}$/.test(code)) {
@@ -410,7 +471,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function sendFiles(files) {
   if (!peer?.ready) return toast('방 열쇠를 받은 뒤에 보낼 수 있어요.', 'error');
-  if (!others().length) return toast('아직 방에 다른 기기가 없어요. [더 초대]로 코드를 알려 주세요.', 'error');
+  if (!others().length && !peer.vault) return toast('아직 방에 다른 기기가 없어요. [더 초대]로 코드를 알려 주세요.', 'error');
   for (const file of files) {
     const id = nextId++;
     const to = target;
@@ -518,7 +579,7 @@ async function sendOne(id, file, job) {
     job.ended = true;
     if (!job.track) {
       outgoing.delete(id);
-      job.view.dir.textContent = '보냄';
+      job.view.dir.textContent = room.vault ? '보관함에 올렸어요' : '보냄';
       job.view.row.querySelector('.bar')?.remove();
       return;
     }
@@ -557,12 +618,12 @@ function finishIfDone(id, job) {
 
 async function sendText(text) {
   if (!peer?.ready) throw new Error('방 열쇠를 받은 뒤에 보낼 수 있어요.');
-  if (!others().length) throw new Error('아직 방에 다른 기기가 없어요.');
+  if (!others().length && !peer.vault) throw new Error('아직 방에 다른 기기가 없어요.');
   const id = nextId++;
   await peer.send(target, FRAME.TEXT, id, { text });
   if (target === 0) for (const who of skipping) missedTexts.set(who, [...(missedTexts.get(who) || []), { id, text }]);
   const view = addRow('out', 'i-text', text, target === 0 ? '모두' : nameOf(target));
-  view.dir.textContent = '보냄';
+  view.dir.textContent = peer.vault && target === 0 ? '보관함에 올렸어요' : '보냄';
 }
 
 // ---- 받기 ----
